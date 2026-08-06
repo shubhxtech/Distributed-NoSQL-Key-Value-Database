@@ -1,0 +1,11 @@
+// raft/build.gradle — stub for Week 4 Raft consensus implementation
+// Dependencies will be added when implementation begins.
+dependencies {
+    implementation project(':proto')
+    implementation 'org.slf4j:slf4j-api:2.0.13'
+    runtimeOnly    'ch.qos.logback:logback-classic:1.5.6'
+
+    testImplementation "org.junit.jupiter:junit-jupiter:5.10.3"
+    testImplementation "org.assertj:assertj-core:3.26.0"
+    testRuntimeOnly    "org.junit.platform:junit-platform-launcher"
+}
