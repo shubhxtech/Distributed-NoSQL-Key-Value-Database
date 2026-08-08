@@ -1,6 +1,6 @@
 package com.kvstore.node;
 
-import com.kvstore.engine.InMemoryStorageEngine;
+import com.kvstore.engine.PersistentStorageEngine;
 import com.kvstore.engine.StorageEngine;
 import com.kvstore.node.config.NodeProperties;
 import org.slf4j.Logger;
@@ -9,6 +9,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+
+import java.nio.file.Path;
 
 /**
  * Entry point for the KV storage node.
@@ -20,8 +22,9 @@ import org.springframework.context.annotation.Bean;
  *   <li>Exposes an HTTP actuator endpoint for health checks and Prometheus metrics.</li>
  * </ol>
  *
- * <p>Day 1–2: backed by {@link InMemoryStorageEngine}.
- * Week 2: will swap to {@code LsmStorageEngine}.
+ * <p><b>Day 1–2:</b> backed by {@code InMemoryStorageEngine} (no persistence).<br>
+ * <b>Day 3–4:</b> backed by {@link PersistentStorageEngine} (WAL — survives crashes).<br>
+ * <b>Week 2:</b> will swap to {@code LsmStorageEngine} (WAL + Memtable + SSTables).
  */
 @SpringBootApplication
 @EnableConfigurationProperties(NodeProperties.class)
@@ -34,13 +37,21 @@ public class NodeApplication {
     }
 
     /**
-     * Exposes the StorageEngine as a Spring bean so gRPC service impl can inject it.
-     * Swapping engines in Week 2 only requires changing this single bean definition.
+     * Provides the {@link StorageEngine} bean used by the gRPC service.
+     *
+     * <p>Day 3–4: {@link PersistentStorageEngine} — writes are fsync'd to a WAL file
+     * before the in-memory state is updated. On startup the WAL is replayed to
+     * restore the pre-crash state. Zero data loss for any acknowledged write.
+     *
+     * <p>To swap in the full LSM engine (Week 2), change the return statement here only.
      */
     @Bean
     public StorageEngine storageEngine(NodeProperties props) {
-        log.info("Initializing InMemoryStorageEngine for node '{}'", props.id());
-        // Week 2: return new LsmStorageEngine(props.dataDir());
-        return new InMemoryStorageEngine();
+        Path dataDir = Path.of(props.dataDir());
+        log.info("Initializing PersistentStorageEngine for node '{}' at '{}'",
+                props.id(), dataDir.toAbsolutePath());
+        // Week 2: return new LsmStorageEngine(dataDir);
+        return new PersistentStorageEngine(dataDir);
     }
 }
+
