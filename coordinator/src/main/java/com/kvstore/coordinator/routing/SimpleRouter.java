@@ -6,6 +6,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -26,6 +28,8 @@ public class SimpleRouter {
 
     private List<NodeInfo> nodes;
     private final AtomicInteger counter = new AtomicInteger(0);
+    /** Node IDs that are currently blacklisted (simulated partition). */
+    private final Set<String> blacklisted = ConcurrentHashMap.newKeySet();
 
     /**
      * Sets the list of available nodes. Called by {@link com.kvstore.coordinator.CoordinatorApplication}
@@ -53,10 +57,34 @@ public class SimpleRouter {
         if (nodes == null || nodes.isEmpty()) {
             throw new IllegalStateException("Router has no nodes configured");
         }
-        // Round-robin: pick next node in sequence
-        int index = Math.abs(counter.getAndIncrement() % nodes.size());
-        NodeInfo selected = nodes.get(index);
-        log.debug("route(key='{}') → node='{}' [round-robin index={}]", key, selected.id(), index);
+        // Filter out blacklisted nodes (simulated partition)
+        List<NodeInfo> available = nodes.stream()
+                .filter(n -> !blacklisted.contains(n.id()))
+                .toList();
+        if (available.isEmpty()) {
+            throw new IllegalStateException("All nodes are blacklisted — no available node");
+        }
+        int index = Math.abs(counter.getAndIncrement() % available.size());
+        NodeInfo selected = available.get(index);
+        log.debug("route(key='{}') → node='{}' [round-robin, {} available]", key, selected.id(), available.size());
         return selected;
+    }
+
+    // ─── Partition simulation ──────────────────────────────────────────────────
+
+    /** Blacklists a node — the coordinator will not route any new requests to it. */
+    public void blacklist(String nodeId) {
+        blacklisted.add(nodeId);
+        log.info("Node '{}' BLACKLISTED (simulated partition)", nodeId);
+    }
+
+    /** Removes a node from the blacklist — routing resumes. */
+    public void unblacklist(String nodeId) {
+        blacklisted.remove(nodeId);
+        log.info("Node '{}' UN-BLACKLISTED (partition healed)", nodeId);
+    }
+
+    public boolean isBlacklisted(String nodeId) {
+        return blacklisted.contains(nodeId);
     }
 }

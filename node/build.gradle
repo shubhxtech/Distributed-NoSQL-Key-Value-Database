@@ -20,6 +20,7 @@ dependencies {
 
     // Spring Boot
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
 
     // gRPC server integration for Spring Boot
     implementation 'net.devh:grpc-server-spring-boot-starter:3.1.0.RELEASE'

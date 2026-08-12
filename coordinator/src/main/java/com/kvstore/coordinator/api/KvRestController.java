@@ -5,6 +5,8 @@ import com.kvstore.coordinator.api.dto.GetValueResponse;
 import com.kvstore.coordinator.api.dto.PutValueRequest;
 import com.kvstore.coordinator.client.NodeGrpcClient;
 import com.kvstore.coordinator.config.NodeInfo;
+import com.kvstore.coordinator.monitoring.ClusterEvent;
+import com.kvstore.coordinator.monitoring.ClusterEventBus;
 import com.kvstore.coordinator.routing.SimpleRouter;
 import com.kvstore.proto.*;
 import io.grpc.StatusRuntimeException;
@@ -41,8 +43,8 @@ public class KvRestController {
 
     private final SimpleRouter   router;
     private final NodeGrpcClient nodeClient;
+    private final ClusterEventBus eventBus;
 
-    // Coordinator-level metrics (node-level metrics live on each node)
     private final Counter coordinatorPuts;
     private final Counter coordinatorGets;
     private final Counter coordinatorDeletes;
@@ -50,9 +52,11 @@ public class KvRestController {
 
     public KvRestController(SimpleRouter router,
                             NodeGrpcClient nodeClient,
+                            ClusterEventBus eventBus,
                             MeterRegistry meterRegistry) {
         this.router     = router;
         this.nodeClient = nodeClient;
+        this.eventBus   = eventBus;
 
         coordinatorPuts    = Counter.builder("coordinator_puts_total").register(meterRegistry);
         coordinatorGets    = Counter.builder("coordinator_gets_total").register(meterRegistry);
@@ -75,6 +79,7 @@ public class KvRestController {
     ) {
         log.info("REST PUT key='{}'", key);
         coordinatorPuts.increment();
+        long start = System.currentTimeMillis();
 
         NodeInfo target = router.route(key);
         try {
@@ -84,6 +89,9 @@ public class KvRestController {
                     .setTtlMs(body.ttlMs())
                     .build());
 
+            double latency = System.currentTimeMillis() - start;
+            eventBus.publish(ClusterEvent.operation(target.id(), "PUT", key, latency, true));
+
             return ResponseEntity.ok(Map.of(
                     "success",  response.getSuccess(),
                     "version",  response.getVersion(),
@@ -91,6 +99,7 @@ public class KvRestController {
             ));
         } catch (StatusRuntimeException e) {
             coordinatorErrors.increment();
+            eventBus.publish(ClusterEvent.operation(target.id(), "PUT", key, System.currentTimeMillis() - start, false));
             log.error("gRPC PUT failed for key='{}' on node='{}': {}", key, target.id(), e.getStatus());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                     .body(Map.of("error", "Node error: " + e.getStatus().getDescription(),
@@ -110,12 +119,16 @@ public class KvRestController {
     public ResponseEntity<GetValueResponse> get(@PathVariable String key) {
         log.info("REST GET key='{}'", key);
         coordinatorGets.increment();
+        long start = System.currentTimeMillis();
 
         NodeInfo target = router.route(key);
         try {
             GetResponse response = nodeClient.get(target.id(), GetRequest.newBuilder()
                     .setKey(key)
                     .build());
+
+            double latency = System.currentTimeMillis() - start;
+            eventBus.publish(ClusterEvent.operation(target.id(), "GET", key, latency, response.getFound()));
 
             if (response.getFound()) {
                 String value = response.getValue().toString(StandardCharsets.UTF_8);
@@ -128,6 +141,7 @@ public class KvRestController {
             }
         } catch (StatusRuntimeException e) {
             coordinatorErrors.increment();
+            eventBus.publish(ClusterEvent.operation(target.id(), "GET", key, System.currentTimeMillis() - start, false));
             log.error("gRPC GET failed for key='{}' on node='{}': {}", key, target.id(), e.getStatus());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
         }
@@ -144,6 +158,7 @@ public class KvRestController {
     public ResponseEntity<Map<String, Object>> delete(@PathVariable String key) {
         log.info("REST DELETE key='{}'", key);
         coordinatorDeletes.increment();
+        long start = System.currentTimeMillis();
 
         NodeInfo target = router.route(key);
         try {
@@ -151,12 +166,15 @@ public class KvRestController {
                     .setKey(key)
                     .build());
 
+            eventBus.publish(ClusterEvent.operation(target.id(), "DELETE", key, System.currentTimeMillis() - start, true));
+
             return ResponseEntity.ok(Map.of(
                     "success",  response.getSuccess(),
                     "routedTo", target.id()
             ));
         } catch (StatusRuntimeException e) {
             coordinatorErrors.increment();
+            eventBus.publish(ClusterEvent.operation(target.id(), "DELETE", key, System.currentTimeMillis() - start, false));
             log.error("gRPC DELETE failed for key='{}' on node='{}': {}", key, target.id(), e.getStatus());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                     .body(Map.of("error", "Node error: " + e.getStatus().getDescription(),

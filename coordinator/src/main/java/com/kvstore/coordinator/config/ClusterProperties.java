@@ -32,7 +32,7 @@ public record ClusterProperties(List<NodeEntry> nodes) {
     /** Converts config entries to {@link NodeInfo} records. */
     public List<NodeInfo> nodeInfoList() {
         return nodes.stream()
-                .map(e -> new NodeInfo(e.id(), e.host(), e.grpcPort()))
+                .map(e -> new NodeInfo(e.id(), e.host(), e.grpcPort(), e.httpPort() == 0 ? 8080 : e.httpPort()))
                 .toList();
     }
 
@@ -40,5 +40,5 @@ public record ClusterProperties(List<NodeEntry> nodes) {
      * A single node entry as parsed from YAML.
      * Uses a nested class so Spring Boot can bind camelCase / kebab-case properties.
      */
-    public record NodeEntry(String id, String host, int grpcPort) {}
+    public record NodeEntry(String id, String host, int grpcPort, int httpPort) {}
 }
