@@ -11,6 +11,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *   node:
  *     id: node-1
  *     data-dir: /data/kv
+ *     memtable-max-size-mb: 4
  * </pre>
  */
 @ConfigurationProperties(prefix = "kv.node")
@@ -21,9 +22,16 @@ public record NodeProperties(
 
         /**
          * Directory where WAL segments and SSTables are stored.
-         * Ignored in Day 1–2 (in-memory engine). Used from Week 1, Day 3+.
+         * Ignored in Day 1–2 (in-memory engine). Used from Day 3+.
          */
-        String dataDir
+        String dataDir,
+
+        /**
+         * Memtable flush threshold in megabytes.
+         * When the skip-list memtable exceeds this size, it is flushed to an SSTable.
+         * Default: 4 MB.
+         */
+        int memtableMaxSizeMb
 ) {
     public NodeProperties {
         if (id == null || id.isBlank()) {
@@ -31,6 +39,9 @@ public record NodeProperties(
         }
         if (dataDir == null || dataDir.isBlank()) {
             dataDir = "./data/" + id;
+        }
+        if (memtableMaxSizeMb <= 0) {
+            memtableMaxSizeMb = 4;   // safe default
         }
     }
 }

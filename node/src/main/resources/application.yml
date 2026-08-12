@@ -14,8 +14,9 @@ grpc:
 # Node configuration
 kv:
   node:
-    id:       ${NODE_ID:node-1}
-    data-dir: ${DATA_DIR:./data/${NODE_ID:node-1}}
+    id:                   ${NODE_ID:node-1}
+    data-dir:             ${DATA_DIR:./data/${NODE_ID:node-1}}
+    memtable-max-size-mb: ${MEMTABLE_MAX_MB:4}   # flush to SSTable when memtable reaches this size
 
 # Actuator — expose health + prometheus
 management:

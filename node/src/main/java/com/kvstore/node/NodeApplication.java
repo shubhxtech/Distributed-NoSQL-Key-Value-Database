@@ -1,7 +1,8 @@
 package com.kvstore.node;
 
-import com.kvstore.engine.PersistentStorageEngine;
+import com.kvstore.engine.LsmStorageEngine;
 import com.kvstore.engine.StorageEngine;
+import com.kvstore.engine.lsm.SkipListMemtable;
 import com.kvstore.node.config.NodeProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,8 +24,9 @@ import java.nio.file.Path;
  * </ol>
  *
  * <p><b>Day 1–2:</b> backed by {@code InMemoryStorageEngine} (no persistence).<br>
- * <b>Day 3–4:</b> backed by {@link PersistentStorageEngine} (WAL — survives crashes).<br>
- * <b>Week 2:</b> will swap to {@code LsmStorageEngine} (WAL + Memtable + SSTables).
+ * <b>Day 3–4:</b> backed by {@code PersistentStorageEngine} (WAL — survives crashes).<br>
+ * <b>Day 5–6:</b> backed by {@link LsmStorageEngine} (WAL + SkipList memtable + SSTables).<br>
+ * <b>Week 2:</b> will add background compaction + leader-follower replication.
  */
 @SpringBootApplication
 @EnableConfigurationProperties(NodeProperties.class)
@@ -39,19 +41,17 @@ public class NodeApplication {
     /**
      * Provides the {@link StorageEngine} bean used by the gRPC service.
      *
-     * <p>Day 3–4: {@link PersistentStorageEngine} — writes are fsync'd to a WAL file
-     * before the in-memory state is updated. On startup the WAL is replayed to
-     * restore the pre-crash state. Zero data loss for any acknowledged write.
-     *
-     * <p>To swap in the full LSM engine (Week 2), change the return statement here only.
+     * <p>Day 5–6: {@link LsmStorageEngine} — WAL-first writes, SkipList memtable,
+     * automatic SSTable flush when memtable exceeds {@code memtableMaxSizeMb}.
+     * Crash recovery replays WAL and reloads existing SSTable files on startup.
      */
     @Bean
     public StorageEngine storageEngine(NodeProperties props) {
         Path dataDir = Path.of(props.dataDir());
-        log.info("Initializing PersistentStorageEngine for node '{}' at '{}'",
-                props.id(), dataDir.toAbsolutePath());
-        // Week 2: return new LsmStorageEngine(dataDir);
-        return new PersistentStorageEngine(dataDir);
+        long maxBytes = (long) props.memtableMaxSizeMb() * 1024 * 1024;
+        log.info("Initializing LsmStorageEngine for node '{}' at '{}' (memtable {}MB)",
+                props.id(), dataDir.toAbsolutePath(), props.memtableMaxSizeMb());
+        return new LsmStorageEngine(dataDir, maxBytes);
     }
 }
 
