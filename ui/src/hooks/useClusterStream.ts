@@ -100,6 +100,12 @@ export function useClusterStream(coordinatorUrl: string = 'http://localhost:8080
             node.sstableCount = eventData.extra.sstableCount;
             node.memtableFillPercent = 0; // resets after flush
             break;
+          case 'COMPACTION':
+            // After compaction, sstableCount drops — update it
+            if (eventData.extra.sstableCount !== undefined) {
+              node.sstableCount = eventData.extra.sstableCount;
+            }
+            break;
         }
         
         current[nodeId] = node;
@@ -120,12 +126,25 @@ export function useClusterStream(coordinatorUrl: string = 'http://localhost:8080
     await fetch(`${coordinatorUrl}/api/v1/monitor/nodes/${nodeId}/restart`, { method: 'POST' });
   };
 
+  /**
+   * Calls POST /api/v1/storage/compact on the node's own HTTP port.
+   * The coordinator proxies this, or we call via the coordinator monitor endpoint.
+   */
+  const triggerCompaction = async (nodeId: string, httpPort: number) => {
+    try {
+      await fetch(`http://localhost:${httpPort}/api/v1/storage/compact`, { method: 'POST' });
+    } catch (e) {
+      console.error(`Compaction trigger failed for ${nodeId}:`, e);
+    }
+  };
+
   return {
     nodes: Object.values(nodes),
     events,
     connected,
     activeClients,
     killNode,
-    restartNode
+    restartNode,
+    triggerCompaction
   };
 }

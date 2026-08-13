@@ -5,7 +5,7 @@ import { TerminalLog } from './TerminalLog';
 import { Moon, Sun, Activity, Database, Network } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
-  const { nodes, events, connected, activeClients, killNode, restartNode } = useClusterStream();
+  const { nodes, events, connected, activeClients, killNode, restartNode, triggerCompaction } = useClusterStream();
   const [isDark, setIsDark] = useState(true);
 
   // Toggle Theme
@@ -72,11 +72,12 @@ export const Dashboard: React.FC = () => {
             )}
             
             {nodes.sort((a,b) => a.id.localeCompare(b.id)).map(node => (
-              <NodeCard 
-                key={node.id} 
-                node={node} 
-                onKill={killNode} 
-                onRestart={restartNode} 
+              <NodeCard
+                key={node.id}
+                node={node}
+                onKill={killNode}
+                onRestart={restartNode}
+                onCompact={triggerCompaction}
               />
             ))}
           </div>
