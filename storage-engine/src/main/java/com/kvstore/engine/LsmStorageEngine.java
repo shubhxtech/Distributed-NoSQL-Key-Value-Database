@@ -1,5 +1,6 @@
 package com.kvstore.engine;
 
+import com.kvstore.engine.compaction.CompactionManager;
 import com.kvstore.engine.lsm.SkipListMemtable;
 import com.kvstore.engine.sstable.SSTableMetadata;
 import com.kvstore.engine.sstable.SSTableReader;
@@ -92,6 +93,9 @@ public class LsmStorageEngine implements StorageEngine {
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
     private volatile boolean closed = false;
 
+    /** Background compaction thread — merges SSTables, evicts tombstones. */
+    private final CompactionManager compactionManager;
+
     // ─── Construction / Recovery ──────────────────────────────────────────────
 
     /**
@@ -120,6 +124,14 @@ public class LsmStorageEngine implements StorageEngine {
 
             // 3. Open WAL for new writes
             this.walWriter = new WalWriter(walPath());
+
+            // 4. Start background compaction
+            this.compactionManager = new CompactionManager(
+                    dataDir, lock, sstables, updatedList -> {
+                        // called after compaction completes — nothing extra needed,
+                        // sstables list is already modified in-place by compaction.
+                    });
+            compactionManager.start();
 
         } catch (IOException e) {
             throw new StorageException("LsmStorageEngine init failed at: " + dataDir, e);
@@ -264,7 +276,7 @@ public class LsmStorageEngine implements StorageEngine {
         log.info("Flush complete. SSTable list size: {}", sstables.size());
     }
 
-    // ─── Metrics exposed for UI ───────────────────────────────────────────────
+    // ─── Metrics exposed for UI ───────────────────────────────────────────────────────────────────────
 
     public int memtableFillPercent() {
         return memtable.fillPercent();
@@ -278,6 +290,11 @@ public class LsmStorageEngine implements StorageEngine {
         try { return Files.size(walPath()); } catch (IOException e) { return -1; }
     }
 
+    /** Manually triggers a compaction cycle. Used by the dashboard and integration tests. */
+    public void triggerCompaction() {
+        compactionManager.triggerNow();
+    }
+
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     @Override
@@ -285,6 +302,7 @@ public class LsmStorageEngine implements StorageEngine {
         if (closed) return;
         closed = true;
         log.info("LsmStorageEngine shutting down.");
+        compactionManager.shutdown();
         // Flush remaining memtable entries
         forceFlush();
         walWriter.close();

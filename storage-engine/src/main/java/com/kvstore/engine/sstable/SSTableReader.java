@@ -2,6 +2,7 @@ package com.kvstore.engine.sstable;
 
 import com.kvstore.engine.StorageException;
 import com.kvstore.engine.ValueEntry;
+import com.kvstore.engine.bloomfilter.BloomFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -9,9 +10,7 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 /**
  * Day 5: Reads a single SSTable file and serves point-lookup queries.
@@ -47,6 +46,12 @@ public class SSTableReader implements Closeable {
     // In-memory sparse index — loaded once on construction
     private final List<String> indexKeys    = new ArrayList<>();
     private final List<Long>   indexOffsets = new ArrayList<>();
+
+    /** Bloom filter loaded from the BLOOM section. May be null for old-format files. */
+    private BloomFilter bloomFilter;
+
+    /** Byte offset of the bloom block within the file. */
+    private long bloomBlockOffset = -1;
 
     /**
      * Metadata that may be updated after index load to reflect real firstKey/lastKey.
@@ -85,19 +90,31 @@ public class SSTableReader implements Closeable {
      *         or empty if the key is not in this SSTable.
      */
     public Optional<ValueEntry> get(String key) {
-        // Fast range pre-check using effectiveMetadata (has real firstKey/lastKey)
+        // 0. Bloom filter fast-path: skip disk entirely if key definitely absent
+        if (bloomFilter != null && !bloomFilter.mightContain(key)) {
+            return Optional.empty();
+        }
+        // 1. Fast range pre-check using effectiveMetadata (has real firstKey/lastKey)
         if (!effectiveMetadata.mightContain(key)) {
             return Optional.empty();
         }
 
-        // Binary search the sparse index to find the nearest preceding key
+        // 2. Binary search the sparse index to find the nearest preceding key
         long dataOffset = findDataOffset(key);
         if (dataOffset < 0) {
             return Optional.empty();
         }
 
-        // Scan forward from that data offset
+        // 3. Scan forward from that data offset
         return scanForKey(key, dataOffset);
+    }
+
+    /**
+     * Returns an iterator over all entries in this SSTable, in sorted (ascending) key order.
+     * Used by the compaction k-way merge.
+     */
+    public Iterator<Map.Entry<String, ValueEntry>> iterator() {
+        return new SstIterator();
     }
 
     public SSTableMetadata metadata() {
@@ -112,58 +129,86 @@ public class SSTableReader implements Closeable {
     // ─── Private: index loading + metadata derivation ─────────────────────────
 
     /**
-     * Reads the footer to get the index offset, then reads all index entries
-     * into {@link #indexKeys} and {@link #indexOffsets}.
+     * Reads the footer, loads the sparse index, and loads the Bloom filter.
+     *
+     * <p>Supports two footer formats:
+     * <ul>
+     *   <li><b>New (28 bytes):</b> [8B indexOffset][8B bloomOffset][4B entryCount][8B magic]</li>
+     *   <li><b>Legacy (20 bytes):</b> [8B indexOffset][4B entryCount][8B magic] — no bloom filter</li>
+     * </ul>
      */
     private void loadIndex() throws IOException {
         long fileLen = raf.length();
-        if (fileLen < SSTableWriter.FOOTER_SIZE) {
-            throw new StorageException("SSTable too small to contain a footer: " + metadata.path());
+
+        // ── Try new 28-byte footer first ──────────────────────────────────────
+        if (fileLen >= SSTableWriter.FOOTER_SIZE) {
+            raf.seek(fileLen - SSTableWriter.FOOTER_SIZE);
+            long indexBlockOffset = raf.readLong();
+            long bloomOffset      = raf.readLong();
+            int  totalEntryCount  = raf.readInt();
+            long magic            = raf.readLong();
+
+            if (magic == SSTableWriter.MAGIC) {
+                log.debug("SSTable footer (v2 28B): indexOffset={}, bloomOffset={}, entries={}",
+                        indexBlockOffset, bloomOffset, totalEntryCount);
+                loadIndexBlock(indexBlockOffset, totalEntryCount);
+                loadBloomBlock(bloomOffset, totalEntryCount);
+                return;
+            }
         }
 
-        // ── Read footer (last 20 bytes) ───────────────────────────────────────
-        raf.seek(fileLen - SSTableWriter.FOOTER_SIZE);
-        long indexBlockOffset = raf.readLong();
-        int  totalEntryCount  = raf.readInt();
-        long magic            = raf.readLong();
+        // ── Fallback: legacy 20-byte footer (files written before bloom filter) ─
+        if (fileLen >= 20) {
+            raf.seek(fileLen - 20);
+            long indexBlockOffset = raf.readLong();
+            int  totalEntryCount  = raf.readInt();
+            long magic            = raf.readLong();
 
-        if (magic != SSTableWriter.MAGIC) {
-            throw new StorageException(
-                    "SSTable magic mismatch in " + metadata.path() +
-                    " (expected 0x%X, got 0x%X)".formatted(SSTableWriter.MAGIC, magic));
+            if (magic == SSTableWriter.MAGIC) {
+                log.debug("SSTable footer (v1 legacy 20B): indexOffset={}, entries={}",
+                        indexBlockOffset, totalEntryCount);
+                loadIndexBlock(indexBlockOffset, totalEntryCount);
+                return; // no bloom filter in legacy files
+            }
         }
 
-        log.debug("SSTable footer: indexOffset={}, entries={}", indexBlockOffset, totalEntryCount);
+        throw new StorageException("SSTable magic mismatch or corrupt footer: " + metadata.path());
+    }
 
-        // ── Read index block ──────────────────────────────────────────────────
+    private void loadIndexBlock(long indexBlockOffset, int totalEntryCount) throws IOException {
         raf.seek(indexBlockOffset);
         int indexEntryCount = raf.readInt();
         for (int i = 0; i < indexEntryCount; i++) {
-            int keyLen   = raf.readInt();
-            byte[] keyB  = new byte[keyLen];
+            int    keyLen = raf.readInt();
+            byte[] keyB   = new byte[keyLen];
             raf.readFully(keyB);
-            long offset  = raf.readLong();
+            long offset = raf.readLong();
             indexKeys.add(new String(keyB, StandardCharsets.UTF_8));
             indexOffsets.add(offset);
         }
 
         if (!indexKeys.isEmpty()) {
-            // firstKey is the first index key (since data is sorted ascending)
             String firstKey = indexKeys.get(0);
-
-            // lastKey: scan forward from the LAST index entry to find the actual
-            // last data key. The last index entry covers keys up to INDEX_INTERVAL-1
-            // entries beyond it, so the real last key may be past the last index key.
-            String lastKey = findLastDataKey(indexOffsets.get(indexOffsets.size() - 1), indexBlockOffset);
-
+            String lastKey  = findLastDataKey(indexOffsets.get(indexOffsets.size() - 1), indexBlockOffset);
             this.effectiveMetadata = new SSTableMetadata(
-                metadata.path(),
-                totalEntryCount,
-                firstKey,
-                lastKey,
-                metadata.createdAtMs(),
-                metadata.sizeBytes()
-            );
+                    metadata.path(), totalEntryCount, firstKey, lastKey,
+                    metadata.createdAtMs(), metadata.sizeBytes());
+        }
+    }
+
+    private void loadBloomBlock(long bloomOffset, int totalEntryCount) {
+        this.bloomBlockOffset = bloomOffset;
+        try {
+            raf.seek(bloomOffset);
+            int bloomLen = raf.readInt();
+            if (bloomLen > 0 && bloomLen < 10_000_000) {
+                byte[] bloomBytes = new byte[bloomLen];
+                raf.readFully(bloomBytes);
+                this.bloomFilter = new BloomFilter(bloomBytes, totalEntryCount);
+                log.debug("Bloom filter loaded: {} bytes, expectedKeys={}", bloomLen, totalEntryCount);
+            }
+        } catch (IOException e) {
+            log.warn("Could not load bloom filter from {}: {}", metadata.path(), e.getMessage());
         }
     }
 
@@ -224,10 +269,13 @@ public class SSTableReader implements Closeable {
      * (keys are sorted, so no match is possible beyond this point).
      */
     private Optional<ValueEntry> scanForKey(String target, long startOffset) {
+        // stop scanning when we reach the index block (or bloom block if present)
+        long scanBound = bloomBlockOffset > 0 ? bloomBlockOffset
+                : effectiveMetadata.sizeBytes() - SSTableWriter.FOOTER_SIZE;
         try {
             raf.seek(startOffset);
 
-            while (raf.getFilePointer() < metadata.sizeBytes() - SSTableWriter.FOOTER_SIZE) {
+            while (raf.getFilePointer() < scanBound) {
                 // Peek: try to read the next key
                 int keyLen;
                 try {
@@ -283,15 +331,69 @@ public class SSTableReader implements Closeable {
      */
     public static SSTableReader open(Path path) throws IOException {
         long size = Files.size(path);
-        // Metadata firstKey/lastKey are unknown when loading existing files at startup.
-        // We use placeholder values — they will be populated from the index on open.
         SSTableMetadata placeholder = new SSTableMetadata(path, 0, "", "", 0L, size);
-        SSTableReader reader = new SSTableReader(placeholder);
-        // Derive firstKey/lastKey from the loaded index
-        if (!reader.indexKeys.isEmpty()) {
-            // We don't have a direct way to patch the record, so we create a new one.
-            // For startup loading we'll just return the reader with the placeholder.
+        return new SSTableReader(placeholder);
+    }
+
+    // ─── SstIterator (used by CompactionManager) ─────────────────────────────
+
+    /**
+     * Iterates over ALL data entries in this SSTable in key-sorted order.
+     * Used by {@link com.kvstore.engine.compaction.CompactionManager} for k-way merge.
+     * Opens a fresh {@link RandomAccessFile} so it does not interfere with concurrent GETs.
+     */
+    private class SstIterator implements Iterator<Map.Entry<String, ValueEntry>> {
+
+        private final RandomAccessFile iterRaf;
+        private final long             bound; // exclusive upper bound (index/bloom block start)
+        private Map.Entry<String, ValueEntry> next;
+
+        SstIterator() {
+            try {
+                this.iterRaf = new RandomAccessFile(effectiveMetadata.path().toFile(), "r");
+                this.bound   = bloomBlockOffset > 0 ? bloomBlockOffset
+                        : (effectiveMetadata.sizeBytes() - SSTableWriter.FOOTER_SIZE);
+                this.iterRaf.seek(0);
+                this.next = readNext();
+            } catch (IOException e) {
+                throw new StorageException("Cannot open SSTable iterator: " + effectiveMetadata.path(), e);
+            }
         }
-        return reader;
+
+        @Override public boolean hasNext() { return next != null; }
+
+        @Override
+        public Map.Entry<String, ValueEntry> next() {
+            if (next == null) throw new NoSuchElementException();
+            Map.Entry<String, ValueEntry> current = next;
+            next = readNext();
+            return current;
+        }
+
+        private Map.Entry<String, ValueEntry> readNext() {
+            try {
+                while (iterRaf.getFilePointer() < bound) {
+                    int keyLen;
+                    try { keyLen = iterRaf.readInt(); } catch (EOFException e) { break; }
+                    if (keyLen <= 0 || keyLen > 4096) break;
+                    byte[] kb = new byte[keyLen];
+                    iterRaf.readFully(kb);
+                    String key    = new String(kb, StandardCharsets.UTF_8);
+                    byte   flags  = iterRaf.readByte();
+                    int    valLen = iterRaf.readInt();
+                    byte[] val    = null;
+                    if (valLen > 0) { val = new byte[valLen]; iterRaf.readFully(val); }
+                    long   ver    = iterRaf.readLong();
+                    boolean tomb  = (flags & SSTableWriter.FLAG_TOMBSTONE) != 0;
+                    ValueEntry entry = new ValueEntry(tomb ? null : val, ver, System.currentTimeMillis(), tomb);
+                    return Map.entry(key, entry);
+                }
+                iterRaf.close();
+            } catch (IOException e) {
+                try { iterRaf.close(); } catch (IOException ignored) {}
+                throw new StorageException("SSTable iteration error", e);
+            }
+            return null;
+        }
     }
 }

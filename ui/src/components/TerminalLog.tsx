@@ -55,7 +55,7 @@ export const TerminalLog: React.FC<TerminalLogProps> = ({ events }) => {
               <div className="mt-0.5">{getIcon(ev.type, ev.success)}</div>
               <div className="flex-1">
                 <span className="text-[var(--color-text-muted)] text-xs mr-2">
-                  {new Date(ev.timestampMs).toISOString().split('T')[1].slice(0,-1)}
+                  {new Date(ev.timestampMs || Date.now()).toISOString().split('T')[1].slice(0,-1)}
                 </span>
                 <span className={ev.type === 'OPERATION' && !ev.success ? 'text-[var(--color-error)]' : ''}>
                   {formatMessage(ev)}

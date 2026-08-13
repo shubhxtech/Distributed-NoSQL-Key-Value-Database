@@ -2,6 +2,7 @@ package com.kvstore.engine.sstable;
 
 import com.kvstore.engine.StorageException;
 import com.kvstore.engine.ValueEntry;
+import com.kvstore.engine.bloomfilter.BloomFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,8 +28,12 @@ import java.util.NavigableMap;
  * │    [4B indexEntryCount]                                           │
  * │    per entry: [4B keyLen][key bytes][8B dataBlockByteOffset]     │
  * ├──────────────────────────────────────────────────────────────────┤
- * │  FOOTER  (last 20 bytes of file)                                 │
- * │    [8B indexBlockOffset][4B totalEntryCount][8B magic]           │
+ * │  BLOOM FILTER BLOCK                                               │
+ * │    [4B bloomByteLen][bloom bit-array bytes]                       │
+ * ├──────────────────────────────────────────────────────────────────┤
+ * │  FOOTER  (last 28 bytes of file)                                  │
+ * │    [8B indexBlockOffset][8B bloomBlockOffset]                     │
+ * │    [4B totalEntryCount][8B magic]                                 │
  * └──────────────────────────────────────────────────────────────────┘
  * </pre>
  *
@@ -58,8 +63,8 @@ public class SSTableWriter {
     /** Magic bytes in the footer: "KVSTBL1\0" encoded as a long. */
     static final long MAGIC = 0x4B5653_54424C_3100L;
 
-    /** Footer is always 20 bytes: [8B indexOffset][4B entryCount][8B magic]. */
-    static final int FOOTER_SIZE = 20;
+    /** Footer is always 28 bytes: [8B indexOffset][8B bloomOffset][4B entryCount][8B magic]. */
+    static final int FOOTER_SIZE = 28;
 
     // ─── Flags ───────────────────────────────────────────────────────────────
     static final byte FLAG_TOMBSTONE = 0x01;
@@ -123,6 +128,19 @@ public class SSTableWriter {
 
             dataBlockLen = currentOffset;
 
+            // ── BLOOM FILTER BLOCK ───────────────────────────────────────────
+            long bloomBlockOffset = currentOffset + (/* index block size computed below */ 0);
+            // We need to write index first to know bloomBlockOffset, so we track it
+            // by noting our position before index
+            long indexStartOffset = currentOffset;
+
+            // Write index block first (we already know its content)
+            int indexByteCount = 4; // writeInt(indexKeys.size())
+            for (int i = 0; i < indexKeys.size(); i++) {
+                indexByteCount += 4 + indexKeys.get(i).getBytes(StandardCharsets.UTF_8).length + 8;
+            }
+            bloomBlockOffset = indexStartOffset + indexByteCount;
+
             // ── INDEX BLOCK ──────────────────────────────────────────────────
             long indexBlockOffset = currentOffset;
             dos.writeInt(indexKeys.size());
@@ -133,8 +151,16 @@ public class SSTableWriter {
                 dos.writeLong(indexOffsets.get(i)[0]);
             }
 
-            // ── FOOTER (always last 20 bytes) ────────────────────────────────
+            // ── BLOOM FILTER BLOCK ───────────────────────────────────────────
+            BloomFilter bloom = new BloomFilter(entryCount);
+            for (String k : snapshot.keySet()) bloom.add(k);
+            byte[] bloomBytes = bloom.toBytes();
+            dos.writeInt(bloomBytes.length);
+            dos.write(bloomBytes);
+
+            // ── FOOTER (always last 28 bytes) ─────────────────────────────────
             dos.writeLong(indexBlockOffset);
+            dos.writeLong(bloomBlockOffset);
             dos.writeInt(entryCount);
             dos.writeLong(MAGIC);
 
@@ -154,6 +180,24 @@ public class SSTableWriter {
 
         return new SSTableMetadata(sstPath, entryCount, firstKey, lastKey,
                 System.currentTimeMillis(), sizeBytes);
+    }
+
+    /**
+     * Package-private overload used by the compaction engine to write
+     * entries from an already-merged iterator rather than a memtable snapshot.
+     */
+    static SSTableMetadata writeEntries(Path dir, java.util.Iterator<Map.Entry<String, ValueEntry>> entries,
+                                        int estimatedCount, String filenameSuffix) {
+        if (estimatedCount <= 0) estimatedCount = 1000;
+        String filename = "sst-%d-%s.sst".formatted(System.currentTimeMillis(), filenameSuffix);
+        Path sstPath = dir.resolve(filename);
+        log.info("Compaction writing merged SSTable: {}", filename);
+
+        // Collect into a TreeMap so SSTableWriter can use the existing write() logic
+        java.util.TreeMap<String, ValueEntry> map = new java.util.TreeMap<>();
+        entries.forEachRemaining(e -> map.put(e.getKey(), e.getValue()));
+        if (map.isEmpty()) throw new IllegalArgumentException("No entries to write");
+        return write(dir, map);
     }
 
     // ─── Private helpers ─────────────────────────────────────────────────────

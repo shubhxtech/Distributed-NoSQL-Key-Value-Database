@@ -23,30 +23,28 @@ public record ClusterEvent(
         String key,
         double latencyMs,
         boolean success,
-        Map<String, Object> extra
+        Map<String, Object> extra,
+        long timestampMs
 ) {
-    /** Epoch millis when this event was created. */
-    public long timestampMs() { return Instant.now().toEpochMilli(); }
-
     // ─── Factories ────────────────────────────────────────────────────────────
 
     public static ClusterEvent operation(String nodeId, String op, String key,
                                          double latencyMs, boolean success) {
-        return new ClusterEvent("OPERATION", nodeId, op, key, latencyMs, success, Map.of());
+        return new ClusterEvent("OPERATION", nodeId, op, key, latencyMs, success, Map.of(), Instant.now().toEpochMilli());
     }
 
     public static ClusterEvent nodeStatus(String nodeId, String status, String role) {
         return new ClusterEvent("NODE_STATUS", nodeId, null, null, 0, true,
-                Map.of("status", status, "role", role != null ? role : "FOLLOWER"));
+                Map.of("status", status, "role", role != null ? role : "FOLLOWER"), Instant.now().toEpochMilli());
     }
 
     public static ClusterEvent memtable(String nodeId, int fillPercent, long walSizeBytes, int sstableCount) {
         return new ClusterEvent("MEMTABLE", nodeId, null, null, 0, true,
-                Map.of("fillPercent", fillPercent, "walSizeBytes", walSizeBytes, "sstableCount", sstableCount));
+                Map.of("fillPercent", fillPercent, "walSizeBytes", walSizeBytes, "sstableCount", sstableCount), Instant.now().toEpochMilli());
     }
 
     public static ClusterEvent sstFlush(String nodeId, int sstableCount) {
         return new ClusterEvent("SST_FLUSH", nodeId, null, null, 0, true,
-                Map.of("sstableCount", sstableCount));
+                Map.of("sstableCount", sstableCount), Instant.now().toEpochMilli());
     }
 }

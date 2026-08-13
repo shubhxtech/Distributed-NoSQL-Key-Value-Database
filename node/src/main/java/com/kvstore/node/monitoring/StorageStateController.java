@@ -3,10 +3,8 @@ package com.kvstore.node.monitoring;
 import com.kvstore.engine.LsmStorageEngine;
 import com.kvstore.engine.StorageEngine;
 import com.kvstore.node.config.NodeProperties;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -14,17 +12,8 @@ import java.util.Map;
 /**
  * Exposes storage engine internals for the cluster dashboard and NodeStatePoller.
  *
- * <p>{@code GET /api/v1/storage/state} returns:
- * <pre>
- * {
- *   "nodeId":              "node-1",
- *   "status":              "UP",
- *   "role":                "FOLLOWER",
- *   "memtableFillPercent": 42,
- *   "walSizeBytes":        2149000,
- *   "sstableCount":        3
- * }
- * </pre>
+ * <p>{@code GET /api/v1/storage/state} returns live metrics (memtable fill %, WAL size, SSTable count).
+ * <p>{@code POST /api/v1/storage/compact} triggers a background compaction cycle on this node.
  */
 @RestController
 @RequestMapping("/api/v1/storage")
@@ -57,5 +46,20 @@ public class StorageStateController {
         }
 
         return state;
+    }
+
+    /**
+     * Manually triggers a compaction cycle on this node.
+     * Called from the dashboard "Trigger Compaction" button.
+     */
+    @PostMapping("/compact")
+    public ResponseEntity<Map<String, Object>> compact() {
+        if (storageEngine instanceof LsmStorageEngine lsm) {
+            lsm.triggerCompaction();
+            return ResponseEntity.ok(Map.of(
+                    "nodeId", nodeProperties.id(),
+                    "status", "compaction_triggered"));
+        }
+        return ResponseEntity.ok(Map.of("status", "not_supported"));
     }
 }
