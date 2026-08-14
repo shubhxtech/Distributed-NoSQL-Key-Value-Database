@@ -15,26 +15,50 @@ import java.util.Arrays;
  * @param version     Monotonic version counter — incremented on every Put or Delete.
  * @param timestampMs Wall-clock time (epoch ms) when this entry was written.
  * @param tombstone   {@code true} if this entry represents a deletion.
+ * @param expiryMs    Absolute epoch ms at which this entry expires. 0 = never expires.
  */
 public record ValueEntry(
         byte[]  value,
         long    version,
         long    timestampMs,
-        boolean tombstone
+        boolean tombstone,
+        long    expiryMs
 ) {
 
     /**
-     * Creates a live value entry.
+     * Creates a live value entry with no TTL (never expires).
      */
     public static ValueEntry of(byte[] value, long version) {
-        return new ValueEntry(value, version, System.currentTimeMillis(), false);
+        return new ValueEntry(value, version, System.currentTimeMillis(), false, 0L);
+    }
+
+    /**
+     * Creates a live value entry with a TTL.
+     *
+     * @param value   the raw bytes to store
+     * @param version monotonic version
+     * @param ttlMs   time-to-live in milliseconds (0 = no expiry)
+     */
+    public static ValueEntry of(byte[] value, long version, long ttlMs) {
+        long now      = System.currentTimeMillis();
+        long expiryMs = (ttlMs > 0) ? (now + ttlMs) : 0L;
+        return new ValueEntry(value, version, now, false, expiryMs);
     }
 
     /**
      * Creates a tombstone (deletion marker) entry.
      */
     public static ValueEntry tombstone(long version) {
-        return new ValueEntry(null, version, System.currentTimeMillis(), true);
+        return new ValueEntry(null, version, System.currentTimeMillis(), true, 0L);
+    }
+
+    /**
+     * Returns {@code true} if this entry has a TTL and that TTL has passed.
+     * Always returns {@code false} for tombstones (they don't expire — they are already deleted).
+     */
+    public boolean isExpired() {
+        if (tombstone || expiryMs == 0) return false;
+        return System.currentTimeMillis() > expiryMs;
     }
 
     /**
@@ -45,8 +69,11 @@ public record ValueEntry(
         if (tombstone) {
             return "ValueEntry[TOMBSTONE version=%d ts=%d]".formatted(version, timestampMs);
         }
-        return "ValueEntry[valueLen=%d version=%d ts=%d]"
-                .formatted(value == null ? 0 : value.length, version, timestampMs);
+        String ttlInfo = expiryMs > 0
+                ? " expiresIn=%dms".formatted(Math.max(0, expiryMs - System.currentTimeMillis()))
+                : "";
+        return "ValueEntry[valueLen=%d version=%d ts=%d%s]"
+                .formatted(value == null ? 0 : value.length, version, timestampMs, ttlInfo);
     }
 
     /**
@@ -59,6 +86,7 @@ public record ValueEntry(
         return version == other.version
                 && timestampMs == other.timestampMs
                 && tombstone == other.tombstone
+                && expiryMs == other.expiryMs
                 && Arrays.equals(value, other.value);
     }
 
@@ -67,6 +95,7 @@ public record ValueEntry(
         int result = Long.hashCode(version);
         result = 31 * result + Long.hashCode(timestampMs);
         result = 31 * result + Boolean.hashCode(tombstone);
+        result = 31 * result + Long.hashCode(expiryMs);
         result = 31 * result + Arrays.hashCode(value);
         return result;
     }

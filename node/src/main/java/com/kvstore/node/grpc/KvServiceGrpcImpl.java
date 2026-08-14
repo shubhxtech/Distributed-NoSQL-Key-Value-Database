@@ -1,6 +1,7 @@
 package com.kvstore.node.grpc;
 
 import com.google.protobuf.ByteString;
+import com.kvstore.engine.LsmStorageEngine;
 import com.kvstore.engine.StorageEngine;
 import com.kvstore.engine.ValueEntry;
 import com.kvstore.node.config.NodeProperties;
@@ -76,7 +77,13 @@ public class KvServiceGrpcImpl extends KvServiceGrpc.KvServiceImplBase {
     public void put(PutRequest request, StreamObserver<PutResponse> responseObserver) {
         putTimer.record(() -> {
             try {
-                storageEngine.put(request.getKey(), request.getValue().toByteArray());
+                // Use the TTL-aware overload if the engine supports it
+                long ttlMs = request.getTtlMs();
+                if (storageEngine instanceof LsmStorageEngine lsm && ttlMs > 0) {
+                    lsm.put(request.getKey(), request.getValue().toByteArray(), ttlMs);
+                } else {
+                    storageEngine.put(request.getKey(), request.getValue().toByteArray());
+                }
                 putsTotal.increment();
                 responseObserver.onNext(PutResponse.newBuilder()
                         .setSuccess(true)

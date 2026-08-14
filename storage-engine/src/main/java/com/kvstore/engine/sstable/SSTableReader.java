@@ -303,12 +303,13 @@ public class SSTableReader implements Closeable {
                 long version = raf.readLong();
 
                 if (cmp == 0) {
-                    // Found — build the ValueEntry
+                    // Found — build the ValueEntry (expiryMs=0: SSTables don't persist TTL)
                     boolean tombstone = (flags & SSTableWriter.FLAG_TOMBSTONE) != 0;
                     return Optional.of(new ValueEntry(tombstone ? null : value,
                             version,
                             System.currentTimeMillis(),
-                            tombstone));
+                            tombstone,
+                            0L));
                 }
 
                 if (cmp > 0) {
@@ -385,7 +386,8 @@ public class SSTableReader implements Closeable {
                     if (valLen > 0) { val = new byte[valLen]; iterRaf.readFully(val); }
                     long   ver    = iterRaf.readLong();
                     boolean tomb  = (flags & SSTableWriter.FLAG_TOMBSTONE) != 0;
-                    ValueEntry entry = new ValueEntry(tomb ? null : val, ver, System.currentTimeMillis(), tomb);
+                    // expiryMs=0: SSTables don't store TTL — expired entries cleaned by compaction
+                    ValueEntry entry = new ValueEntry(tomb ? null : val, ver, System.currentTimeMillis(), tomb, 0L);
                     return Map.entry(key, entry);
                 }
                 iterRaf.close();

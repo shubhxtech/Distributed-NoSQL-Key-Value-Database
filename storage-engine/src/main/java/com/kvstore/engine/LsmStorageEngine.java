@@ -2,6 +2,7 @@ package com.kvstore.engine;
 
 import com.kvstore.engine.cache.LruCache;
 import com.kvstore.engine.compaction.CompactionManager;
+import com.kvstore.engine.ttl.TtlReaper;
 import com.kvstore.engine.lsm.SkipListMemtable;
 import com.kvstore.engine.sstable.SSTableMetadata;
 import com.kvstore.engine.sstable.SSTableReader;
@@ -104,6 +105,9 @@ public class LsmStorageEngine implements StorageEngine {
      */
     private final LruCache<String, ValueEntry> readCache = new LruCache<>(1_000);
 
+    /** Background TTL reaper — evicts expired keys from memtable every 10s. */
+    private TtlReaper ttlReaper;
+
     // ─── Construction / Recovery ──────────────────────────────────────────────
 
     /**
@@ -136,10 +140,14 @@ public class LsmStorageEngine implements StorageEngine {
             // 4. Start background compaction
             this.compactionManager = new CompactionManager(
                     dataDir, lock, sstables, updatedList -> {
-                        // called after compaction completes — nothing extra needed,
-                        // sstables list is already modified in-place by compaction.
+                        // after compaction, clear cache — merged SSTable changes key ownership
+                        readCache.clear();
                     });
             compactionManager.start();
+
+            // 5. Start background TTL reaper
+            this.ttlReaper = new TtlReaper(this);
+            this.ttlReaper.start();
 
         } catch (IOException e) {
             throw new StorageException("LsmStorageEngine init failed at: " + dataDir, e);
@@ -155,6 +163,17 @@ public class LsmStorageEngine implements StorageEngine {
 
     @Override
     public void put(String key, byte[] value) {
+        put(key, value, 0L);
+    }
+
+    /**
+     * Stores a key-value pair with an optional TTL.
+     *
+     * @param key    the key (must not be blank)
+     * @param value  the value bytes (must not be null)
+     * @param ttlMs  time-to-live in ms; 0 means no expiry
+     */
+    public void put(String key, byte[] value, long ttlMs) {
         if (key == null || key.isBlank()) throw new IllegalArgumentException("Key must not be blank");
         if (value == null) throw new IllegalArgumentException("Value must not be null");
 
@@ -166,7 +185,7 @@ public class LsmStorageEngine implements StorageEngine {
 
         lock.writeLock().lock();
         try {
-            memtable.put(key, buildEntry(value, false));
+            memtable.put(key, buildEntry(value, false, ttlMs));
             if (memtable.isFull()) {
                 flushUnderLock();
             }
@@ -201,6 +220,11 @@ public class LsmStorageEngine implements StorageEngine {
         // 0. LRU Cache fast-path — zero disk I/O for hot keys
         ValueEntry cached = readCache.get(key);
         if (cached != null) {
+            // Lazy TTL check on cached entry
+            if (cached.isExpired()) {
+                readCache.invalidate(key);
+                return Optional.empty();
+            }
             return cached.tombstone() ? Optional.empty() : Optional.of(cached);
         }
 
@@ -210,6 +234,8 @@ public class LsmStorageEngine implements StorageEngine {
             Optional<ValueEntry> memResult = memtable.get(key);
             if (memResult.isPresent()) {
                 ValueEntry e = memResult.get();
+                // Lazy TTL expiry: treat expired entries as if they don't exist
+                if (e.isExpired()) return Optional.empty();
                 if (!e.tombstone()) readCache.put(key, e);
                 return e.tombstone() ? Optional.empty() : Optional.of(e);
             }
@@ -219,6 +245,7 @@ public class LsmStorageEngine implements StorageEngine {
                 Optional<ValueEntry> sstResult = reader.get(key);
                 if (sstResult.isPresent()) {
                     ValueEntry e = sstResult.get();
+                    if (e.isExpired()) return Optional.empty();
                     if (!e.tombstone()) readCache.put(key, e); // populate cache from disk
                     return e.tombstone() ? Optional.empty() : Optional.of(e);
                 }
@@ -329,6 +356,7 @@ public class LsmStorageEngine implements StorageEngine {
         if (closed) return;
         closed = true;
         log.info("LsmStorageEngine shutting down.");
+        if (ttlReaper != null) ttlReaper.stop();
         compactionManager.shutdown();
         // Flush remaining memtable entries
         forceFlush();
@@ -411,6 +439,32 @@ public class LsmStorageEngine implements StorageEngine {
             new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
 
     private static ValueEntry buildEntry(byte[] value, boolean tombstone) {
-        return new ValueEntry(value, VERSION.incrementAndGet(), System.currentTimeMillis(), tombstone);
+        return buildEntry(value, tombstone, 0L);
+    }
+
+    private static ValueEntry buildEntry(byte[] value, boolean tombstone, long ttlMs) {
+        long version = VERSION.incrementAndGet();
+        if (tombstone) return ValueEntry.tombstone(version);
+        return ValueEntry.of(value, version, ttlMs);
+    }
+
+    /**
+     * Scans the memtable for entries that have passed their TTL and writes a tombstone
+     * for each expired key. Called by {@link com.kvstore.engine.ttl.TtlReaper} every 10s.
+     *
+     * @return the number of expired keys evicted
+     */
+    public int evictExpiredFromMemtable() {
+        // Take a snapshot of current keys without holding the write lock
+        var snapshot = memtable.snapshot();
+        int evicted = 0;
+        for (var entry : snapshot.entrySet()) {
+            if (entry.getValue().isExpired()) {
+                // delete() writes a tombstone — LRU will also be invalidated
+                delete(entry.getKey());
+                evicted++;
+            }
+        }
+        return evicted;
     }
 }
