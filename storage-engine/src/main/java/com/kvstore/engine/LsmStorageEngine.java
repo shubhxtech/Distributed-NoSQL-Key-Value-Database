@@ -1,5 +1,6 @@
 package com.kvstore.engine;
 
+import com.kvstore.engine.cache.LruCache;
 import com.kvstore.engine.compaction.CompactionManager;
 import com.kvstore.engine.lsm.SkipListMemtable;
 import com.kvstore.engine.sstable.SSTableMetadata;
@@ -96,6 +97,13 @@ public class LsmStorageEngine implements StorageEngine {
     /** Background compaction thread — merges SSTables, evicts tombstones. */
     private final CompactionManager compactionManager;
 
+    /**
+     * Read-through LRU cache. Sits in front of bloom filter + SSTable scan.
+     * Invalidated on every write/delete to maintain consistency.
+     * Default capacity: 1000 entries — ~few MB in-memory for typical values.
+     */
+    private final LruCache<String, ValueEntry> readCache = new LruCache<>(1_000);
+
     // ─── Construction / Recovery ──────────────────────────────────────────────
 
     /**
@@ -150,6 +158,9 @@ public class LsmStorageEngine implements StorageEngine {
         if (key == null || key.isBlank()) throw new IllegalArgumentException("Key must not be blank");
         if (value == null) throw new IllegalArgumentException("Value must not be null");
 
+        // Invalidate cache BEFORE WAL write so concurrent readers don't see a stale value
+        readCache.invalidate(key);
+
         // WAL first (fsync before memory) — holds no lock during I/O
         walWriter.append(WalEntry.put(key, value));
 
@@ -168,6 +179,8 @@ public class LsmStorageEngine implements StorageEngine {
     public void delete(String key) {
         if (key == null || key.isBlank()) throw new IllegalArgumentException("Key must not be blank");
 
+        readCache.invalidate(key);
+
         walWriter.append(WalEntry.delete(key));
 
         lock.writeLock().lock();
@@ -185,20 +198,28 @@ public class LsmStorageEngine implements StorageEngine {
 
     @Override
     public Optional<ValueEntry> get(String key) {
+        // 0. LRU Cache fast-path — zero disk I/O for hot keys
+        ValueEntry cached = readCache.get(key);
+        if (cached != null) {
+            return cached.tombstone() ? Optional.empty() : Optional.of(cached);
+        }
+
         lock.readLock().lock();
         try {
             // 1. Check memtable first (most recent data, no disk I/O)
             Optional<ValueEntry> memResult = memtable.get(key);
             if (memResult.isPresent()) {
                 ValueEntry e = memResult.get();
+                if (!e.tombstone()) readCache.put(key, e);
                 return e.tombstone() ? Optional.empty() : Optional.of(e);
             }
 
-            // 2. Search SSTables newest → oldest
+            // 2. Search SSTables newest → oldest (bloom filter checked inside reader)
             for (SSTableReader reader : sstables) {
                 Optional<ValueEntry> sstResult = reader.get(key);
                 if (sstResult.isPresent()) {
                     ValueEntry e = sstResult.get();
+                    if (!e.tombstone()) readCache.put(key, e); // populate cache from disk
                     return e.tombstone() ? Optional.empty() : Optional.of(e);
                 }
             }
@@ -294,6 +315,12 @@ public class LsmStorageEngine implements StorageEngine {
     public void triggerCompaction() {
         compactionManager.triggerNow();
     }
+
+    // ─── Cache metrics ────────────────────────────────────────────────────────
+    public int  cacheHitPercent() { return readCache.hitPercent(); }
+    public long cacheHitCount()   { return readCache.hitCount(); }
+    public long cacheMissCount()  { return readCache.missCount(); }
+    public int  cacheSize()       { return readCache.size(); }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 

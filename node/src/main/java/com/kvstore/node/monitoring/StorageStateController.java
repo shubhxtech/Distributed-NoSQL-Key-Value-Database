@@ -39,6 +39,8 @@ public class StorageStateController {
             state.put("memtableFillPercent", lsm.memtableFillPercent());
             state.put("walSizeBytes",        lsm.walSizeBytes());
             state.put("sstableCount",        lsm.sstableCount());
+            state.put("cacheHitPercent",     lsm.cacheHitPercent());
+            state.put("cacheSize",           lsm.cacheSize());
         } else {
             state.put("memtableFillPercent", 0);
             state.put("walSizeBytes",        -1L);

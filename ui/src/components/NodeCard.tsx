@@ -120,6 +120,31 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
           </div>
         </div>
 
+        {/* Cache Hit % */}
+        <div className="bg-[var(--color-surface-hover)] rounded-xl p-3 flex flex-col justify-center">
+          <div className="text-xs text-[var(--color-text-muted)] flex items-center gap-1 mb-1">
+            <Database size={12}/> LRU Cache
+          </div>
+          <div className="flex items-end gap-1">
+            <span className="text-lg font-bold leading-none" style={{
+              color: node.cacheHitPercent > 60 ? 'var(--color-success)'
+                   : node.cacheHitPercent > 20 ? 'var(--color-warning)'
+                   : 'var(--color-text-muted)'
+            }}>
+              {node.cacheHitPercent}%
+            </span>
+            <span className="text-[10px] text-[var(--color-text-muted)] mb-0.5">hit</span>
+          </div>
+          <div className="mt-1 h-1 rounded-full bg-[var(--color-border)] overflow-hidden">
+            <motion.div
+              className="h-full rounded-full"
+              animate={{ width: `${node.cacheHitPercent}%` }}
+              transition={{ duration: 0.5 }}
+              style={{ background: 'linear-gradient(to right, var(--color-brand-500), var(--color-info))' }}
+            />
+          </div>
+        </div>
+
         {/* SSTables with bar visualization */}
         <div className="col-span-2 bg-[var(--color-surface-hover)] rounded-xl p-3">
           <div className="flex items-center justify-between mb-2">

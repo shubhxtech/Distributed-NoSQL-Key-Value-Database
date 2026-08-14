@@ -11,6 +11,7 @@ export interface NodeState {
   memtableFillPercent: number;
   walSizeBytes: number;
   sstableCount: number;
+  cacheHitPercent: number;
 }
 
 export interface ClusterEvent {
@@ -41,11 +42,12 @@ export function useClusterStream(coordinatorUrl: string = 'http://localhost:8080
       data.nodes.forEach((n: any) => {
         nodeMap[n.id] = {
           ...n,
-          status: n.blacklisted ? 'KILLED' : 'DOWN', // Will be updated by SSE
+          status: n.blacklisted ? 'KILLED' : 'DOWN',
           role: 'FOLLOWER',
           memtableFillPercent: 0,
           walSizeBytes: 0,
-          sstableCount: 0
+          sstableCount: 0,
+          cacheHitPercent: 0,
         };
       });
       
@@ -95,6 +97,9 @@ export function useClusterStream(coordinatorUrl: string = 'http://localhost:8080
             node.memtableFillPercent = eventData.extra.fillPercent;
             node.walSizeBytes = eventData.extra.walSizeBytes;
             node.sstableCount = eventData.extra.sstableCount;
+            if (eventData.extra.cacheHitPercent !== undefined) {
+              node.cacheHitPercent = eventData.extra.cacheHitPercent;
+            }
             break;
           case 'SST_FLUSH':
             node.sstableCount = eventData.extra.sstableCount;
