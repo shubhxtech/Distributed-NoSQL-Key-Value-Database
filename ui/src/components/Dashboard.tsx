@@ -8,6 +8,7 @@ import { BurstTest } from './BurstTest';
 import { InteractiveStore } from './InteractiveStore';
 import { StorageVisualizer } from './StorageVisualizer';
 import { Moon, Sun, Database, Activity, GitBranch } from 'lucide-react';
+import { HashRing } from './HashRing';
 
 export const Dashboard = () => {
   const { nodes, events, connected, activeClients, killNode, restartNode, triggerCompaction } = useClusterStream();
@@ -101,6 +102,9 @@ export const Dashboard = () => {
 
         {/* ── Write path ── */}
         <WritePath events={events} nodes={nodes} />
+
+        {/* ── Hash Ring ── */}
+        <HashRing />
 
         {/* ── Main body: nodes left, terminal right ── */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 360px', gap: 20, alignItems: 'start' }}>
