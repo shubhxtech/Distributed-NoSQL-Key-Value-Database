@@ -64,4 +64,21 @@ public class StorageStateController {
         }
         return ResponseEntity.ok(Map.of("status", "not_supported"));
     }
+
+    /**
+     * Exposes the deep internal state of the LSM engine (Memtable contents, SSTable lists)
+     * Used by the Storage Visualizer in the UI.
+     */
+    @GetMapping("/debug/dump")
+    public ResponseEntity<Map<String, Object>> getDebugDump() {
+        if (storageEngine instanceof LsmStorageEngine lsm) {
+            Map<String, Object> dump = lsm.getStorageStateDump();
+            dump.put("nodeId", nodeProperties.id());
+            return ResponseEntity.ok(dump);
+        }
+        return ResponseEntity.status(501).body(Map.of(
+                "error", "Not an LSM storage engine",
+                "nodeId", nodeProperties.id()
+        ));
+    }
 }

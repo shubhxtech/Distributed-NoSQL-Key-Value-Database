@@ -11,9 +11,8 @@
 ### Storage Node
 - **Role:** Owns a slice of the key space. Stores data durably.
 - **Engine evolution:**
-  - Day 1-2: `InMemoryStorageEngine` (ConcurrentHashMap)
-  - Week 1 Day 3-7: WAL + SSTable
-  - Week 2: Full LSM-tree (Memtable + flush + compaction + bloom filter + LRU cache)
+  - Week 1: WAL + SSTable
+  - Week 2: Full LSM-tree (`LsmStorageEngine`: Memtable + flush + compaction + bloom filter + LRU cache)
 - **Ports:** gRPC :9090, HTTP actuator :8080.
 
 ### Raft (Week 4)

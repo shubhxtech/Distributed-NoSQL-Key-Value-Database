@@ -31,7 +31,7 @@ public class NodeHealthIndicator implements HealthIndicator {
             return Health.up()
                     .withDetail("nodeId",   nodeProperties.id())
                     .withDetail("liveKeys", liveKeys)
-                    .withDetail("engine",   "InMemoryStorageEngine")
+                    .withDetail("engine",   "LsmStorageEngine")
                     .build();
         } catch (Exception e) {
             return Health.down(e)

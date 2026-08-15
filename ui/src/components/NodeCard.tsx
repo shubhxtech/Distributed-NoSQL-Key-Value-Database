@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { NodeState } from '../hooks/useClusterStream';
-import { Server, Database, Save, HardDrive, Play, Square, Layers, Loader2 } from 'lucide-react';
+import { Server, Layers, HardDrive, Cpu, RefreshCw, Loader2 } from 'lucide-react';
 import { PieChart, Pie, Cell } from 'recharts';
 
 interface NodeCardProps {
@@ -12,192 +12,302 @@ interface NodeCardProps {
 }
 
 export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onCompact }) => {
-  const isUp = node.status === 'UP';
+  const isUp     = node.status === 'UP';
   const isKilled = node.status === 'KILLED' || node.blacklisted;
   const [compacting, setCompacting] = useState(false);
-
-  const statusColor = isUp ? 'var(--color-success)' : (isKilled ? 'var(--color-error)' : 'var(--color-warning)');
-  const statusBg    = isUp ? 'bg-emerald-500/10' : (isKilled ? 'bg-red-500/10' : 'bg-yellow-500/10');
-
-  // Format bytes → human readable
-  const formatSize = (bytes: number) => {
-    if (!bytes || bytes < 0) return '—';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-  };
 
   const handleCompact = async () => {
     setCompacting(true);
     await onCompact(node.id, node.httpPort);
-    setTimeout(() => setCompacting(false), 3000); // visual feedback for 3s
+    setTimeout(() => setCompacting(false), 3000);
   };
 
-  // Memtable radial chart data
-  const memtableData = [
-    { name: 'Filled', value: node.memtableFillPercent },
-    { name: 'Empty', value: Math.max(0, 100 - node.memtableFillPercent) }
+  const formatSize = (bytes: number) => {
+    if (!bytes || bytes < 0) return '—';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(2) + ' MB';
+  };
+
+  // Semantic status
+  const statusColor = isUp ? 'var(--green)' : isKilled ? 'var(--red)' : 'var(--amber)';
+  const statusBg    = isUp ? 'var(--green-bg)' : isKilled ? 'var(--red-bg)' : 'var(--amber-bg)';
+  const statusLabel = isKilled ? 'Partitioned' : isUp ? 'Healthy' : 'Down';
+
+  // Memtable
+  const fillPct = node.memtableFillPercent;
+  const fillColor = fillPct > 80 ? 'var(--amber)' : 'var(--accent)';
+  const memPie = [
+    { name: 'used',  value: fillPct },
+    { name: 'free',  value: Math.max(0, 100 - fillPct) },
   ];
 
-  // SSTable bar: show up to 8 "slots" visually
-  const MAX_SST_VISUAL = 8;
-  const sstSlots = Array.from({ length: MAX_SST_VISUAL }, (_, i) => i < node.sstableCount);
-  const sstBarColor = node.sstableCount >= 4
-    ? 'var(--color-warning)'
-    : 'var(--color-brand-500)';
+  // SSTable slots (max 8 visual)
+  const MAX_SLOTS = 8;
+  const sstColor = node.sstableCount >= 4 ? 'var(--amber)' : 'var(--accent)';
+
+  // Cache quality
+  const cacheColor = node.cacheHitPercent > 60 ? 'var(--green)'
+                   : node.cacheHitPercent > 20 ? 'var(--amber)'
+                   : 'var(--text-3)';
 
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className={`glass-card rounded-2xl overflow-hidden border ${isKilled ? 'opacity-70 grayscale-[30%]' : ''}`}
-      style={{ borderColor: isUp ? 'var(--color-border)' : statusColor }}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: isKilled ? 0.65 : 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      style={{
+        background: 'var(--surface-0)',
+        border: `1px solid ${isUp ? 'var(--border)' : statusColor}`,
+        borderRadius: 12,
+        overflow: 'hidden',
+        filter: isKilled ? 'grayscale(0.3)' : 'none',
+        display: 'flex',
+        flexDirection: 'column',
+      }}
     >
-      {/* Header */}
-      <div className={`p-4 flex items-center justify-between border-b border-[var(--color-border)] ${statusBg}`}>
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <Server size={20} style={{ color: statusColor }} />
+      {/* ── Header ── */}
+      <div style={{
+        padding: '12px 16px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        borderBottom: '1px solid var(--border-subtle)',
+        background: isUp ? 'transparent' : statusBg,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* Status indicator */}
+          <div style={{ position: 'relative', flexShrink: 0 }}>
+            <div style={{
+              width: 34, height: 34, borderRadius: 8,
+              background: 'var(--surface-1)',
+              border: '1px solid var(--border)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: statusColor,
+            }}>
+              <Server size={16} />
+            </div>
             {isUp && (
-              <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-              </span>
+              <span style={{
+                position: 'absolute', top: -2, right: -2,
+                width: 8, height: 8, borderRadius: '50%',
+                background: 'var(--green)',
+                boxShadow: '0 0 0 2px var(--surface-0)',
+              }} />
             )}
           </div>
+
           <div>
-            <h3 className="font-bold text-[var(--color-text-primary)] leading-tight">{node.id}</h3>
-            <span className="text-xs text-[var(--color-text-muted)] font-mono">{node.host}:{node.grpcPort}</span>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-1)', letterSpacing: '-0.01em' }}>
+              {node.id}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--font-mono)', marginTop: 1 }}>
+              :{node.grpcPort}
+            </div>
           </div>
         </div>
 
-        <div className="flex flex-col items-end gap-1">
-          <span className="px-2.5 py-0.5 rounded-full text-xs font-medium border"
-                style={{ color: statusColor, borderColor: statusColor, backgroundColor: 'transparent' }}>
-            {isKilled ? 'PARTITIONED' : node.status}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+          <span style={{
+            fontSize: 10, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase',
+            color: statusColor,
+            background: statusBg,
+            padding: '2px 8px', borderRadius: 4,
+          }}>
+            {statusLabel}
           </span>
-          <span className="text-[10px] uppercase tracking-wider font-semibold text-[var(--color-text-muted)]">
-            {node.role}
-          </span>
-        </div>
-      </div>
-
-      {/* Metrics Grid */}
-      <div className="p-4 grid grid-cols-2 gap-3">
-
-        {/* Memtable radial */}
-        <div className="col-span-2 sm:col-span-1 bg-[var(--color-surface-hover)] rounded-xl p-3 flex items-center gap-3">
-          <div className="w-12 h-12 relative flex-shrink-0">
-            <PieChart width={48} height={48}>
-              <Pie data={memtableData} cx="50%" cy="50%"
-                   innerRadius={16} outerRadius={24}
-                   startAngle={90} endAngle={-270} dataKey="value" stroke="none">
-                <Cell key="filled" fill={node.memtableFillPercent > 80 ? 'var(--color-warning)' : 'var(--color-brand-500)'} />
-                <Cell key="empty"  fill="var(--color-border)" />
-              </Pie>
-            </PieChart>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <span className="text-[10px] font-bold text-[var(--color-text-primary)]">{node.memtableFillPercent}%</span>
-            </div>
-          </div>
-          <div>
-            <div className="text-xs text-[var(--color-text-muted)] flex items-center gap-1 mb-0.5">
-              <Database size={12}/> Memtable
-            </div>
-            <div className="text-sm font-semibold text-[var(--color-text-primary)]">SkipList</div>
-            <div className="text-[10px] text-[var(--color-text-muted)]">{formatSize(node.walSizeBytes)} WAL</div>
-          </div>
-        </div>
-
-        {/* WAL Size */}
-        <div className="bg-[var(--color-surface-hover)] rounded-xl p-3 flex flex-col justify-center">
-          <div className="text-xs text-[var(--color-text-muted)] flex items-center gap-1 mb-1">
-            <HardDrive size={12}/> WAL Log
-          </div>
-          <div className="text-sm font-bold text-[var(--color-text-primary)] font-mono">
-            {formatSize(node.walSizeBytes)}
-          </div>
-        </div>
-
-        {/* Cache Hit % */}
-        <div className="bg-[var(--color-surface-hover)] rounded-xl p-3 flex flex-col justify-center">
-          <div className="text-xs text-[var(--color-text-muted)] flex items-center gap-1 mb-1">
-            <Database size={12}/> LRU Cache
-          </div>
-          <div className="flex items-end gap-1">
-            <span className="text-lg font-bold leading-none" style={{
-              color: node.cacheHitPercent > 60 ? 'var(--color-success)'
-                   : node.cacheHitPercent > 20 ? 'var(--color-warning)'
-                   : 'var(--color-text-muted)'
-            }}>
-              {node.cacheHitPercent}%
+          {node.role && (
+            <span style={{ fontSize: 9, color: 'var(--text-3)', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              {node.role}
             </span>
-            <span className="text-[10px] text-[var(--color-text-muted)] mb-0.5">hit</span>
-          </div>
-          <div className="mt-1 h-1 rounded-full bg-[var(--color-border)] overflow-hidden">
-            <motion.div
-              className="h-full rounded-full"
-              animate={{ width: `${node.cacheHitPercent}%` }}
-              transition={{ duration: 0.5 }}
-              style={{ background: 'linear-gradient(to right, var(--color-brand-500), var(--color-info))' }}
-            />
-          </div>
-        </div>
-
-        {/* SSTables with bar visualization */}
-        <div className="col-span-2 bg-[var(--color-surface-hover)] rounded-xl p-3">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-xs text-[var(--color-text-muted)] flex items-center gap-1">
-              <Layers size={12}/> SSTables on Disk
-            </div>
-            <span className="text-xs font-bold" style={{ color: sstBarColor }}>
-              {node.sstableCount} files
-            </span>
-          </div>
-          {/* Visual SSTable slots */}
-          <div className="flex gap-1 items-end h-4">
-            {sstSlots.map((filled, i) => (
-              <motion.div
-                key={i}
-                initial={false}
-                animate={{ scaleY: filled ? 1 : 0.3, opacity: filled ? 1 : 0.2 }}
-                transition={{ duration: 0.3, delay: i * 0.04 }}
-                className="flex-1 rounded-sm origin-bottom"
-                style={{
-                  height: '100%',
-                  backgroundColor: filled ? sstBarColor : 'var(--color-border)',
-                }}
-              />
-            ))}
-          </div>
-          {node.sstableCount >= 4 && (
-            <p className="text-[10px] text-[var(--color-warning)] mt-1.5">
-              ⚠ Compaction recommended (≥4 files)
-            </p>
           )}
         </div>
       </div>
 
-      {/* Controls */}
-      <div className="px-4 pb-4 pt-2 border-t border-[var(--color-border)] flex gap-2">
+      {/* ── Metrics ── */}
+      <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1 }}>
+
+        {/* Memtable — visually dominant row */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {/* Donut */}
+          <div style={{ position: 'relative', flexShrink: 0, width: 44, height: 44 }}>
+            <PieChart width={44} height={44}>
+              <Pie data={memPie} cx="50%" cy="50%" innerRadius={14} outerRadius={22}
+                   startAngle={90} endAngle={-270} dataKey="value" stroke="none">
+                <Cell fill={fillColor} />
+                <Cell fill="var(--surface-2)" />
+              </Pie>
+            </PieChart>
+            <div style={{
+              position: 'absolute', inset: 0, display: 'flex',
+              alignItems: 'center', justifyContent: 'center',
+              fontSize: 8, fontWeight: 700, color: 'var(--text-2)', fontFamily: 'var(--font-mono)'
+            }}>
+              {fillPct}%
+            </div>
+          </div>
+
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 5 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-2)' }}>Memtable</span>
+              <span style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>SkipList</span>
+            </div>
+            {/* Progress bar */}
+            <div style={{ height: 5, background: 'var(--surface-2)', borderRadius: 99, overflow: 'hidden' }}>
+              <motion.div
+                animate={{ width: `${fillPct}%` }}
+                transition={{ duration: 0.5, ease: 'easeOut' }}
+                style={{
+                  height: '100%', borderRadius: 99,
+                  background: fillPct > 80
+                    ? 'linear-gradient(to right, var(--amber), var(--red))'
+                    : 'linear-gradient(to right, var(--accent), #60a5fa)',
+                }}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+              <span style={{ fontSize: 9, color: 'var(--text-3)' }}>WAL {formatSize(node.walSizeBytes)}</span>
+              <span style={{ fontSize: 9, color: fillPct > 80 ? 'var(--amber)' : 'var(--text-3)' }}>
+                {fillPct > 80 ? '⚠ flush imminent' : `${fillPct}% full`}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div style={{ height: 1, background: 'var(--border-subtle)' }} />
+
+        {/* SSTable + Cache — side by side */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+
+          {/* SSTables */}
+          <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border-subtle)', borderRadius: 8, padding: '10px 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8 }}>
+              <Layers size={11} style={{ color: 'var(--text-3)' }} />
+              <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-3)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>SSTables</span>
+            </div>
+
+            {/* Stacked file slots */}
+            <div style={{ display: 'flex', gap: 3, alignItems: 'flex-end', height: 20, marginBottom: 6 }}>
+              {Array.from({ length: MAX_SLOTS }, (_, i) => {
+                const filled = i < node.sstableCount;
+                return (
+                  <motion.div
+                    key={i}
+                    initial={false}
+                    animate={{ scaleY: filled ? 1 : 0.25, opacity: filled ? 1 : 0.18 }}
+                    transition={{ duration: 0.25, delay: i * 0.03 }}
+                    style={{
+                      flex: 1, height: '100%', borderRadius: 3,
+                      transformOrigin: 'bottom',
+                      background: filled ? sstColor : 'var(--surface-2)',
+                    }}
+                  />
+                );
+              })}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 3 }}>
+              <span style={{ fontSize: 16, fontWeight: 800, color: sstColor, fontFamily: 'var(--font-mono)', letterSpacing: '-0.03em', lineHeight: 1 }}>
+                {node.sstableCount}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--text-3)' }}>files</span>
+            </div>
+
+            {node.sstableCount >= 4 && (
+              <div style={{ marginTop: 5, fontSize: 9, color: 'var(--amber)', fontWeight: 600 }}>
+                ⚠ compact recommended
+              </div>
+            )}
+          </div>
+
+          {/* LRU Cache */}
+          <div style={{ background: 'var(--surface-1)', border: '1px solid var(--border-subtle)', borderRadius: 8, padding: '10px 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8 }}>
+              <Cpu size={11} style={{ color: 'var(--text-3)' }} />
+              <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-3)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>LRU Cache</span>
+            </div>
+
+            {/* Arc fill bar */}
+            <div style={{ height: 5, background: 'var(--surface-2)', borderRadius: 99, overflow: 'hidden', marginBottom: 6 }}>
+              <motion.div
+                animate={{ width: `${node.cacheHitPercent}%` }}
+                transition={{ duration: 0.5 }}
+                style={{
+                  height: '100%', borderRadius: 99,
+                  background: node.cacheHitPercent > 60
+                    ? 'linear-gradient(to right, var(--green), #4ade80)'
+                    : node.cacheHitPercent > 20
+                    ? 'linear-gradient(to right, var(--amber), #fcd34d)'
+                    : 'var(--surface-2)',
+                }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 3 }}>
+              <span style={{ fontSize: 16, fontWeight: 800, color: cacheColor, fontFamily: 'var(--font-mono)', letterSpacing: '-0.03em', lineHeight: 1 }}>
+                {node.cacheHitPercent}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--text-3)' }}>% hit</span>
+            </div>
+
+            <div style={{ marginTop: 5, fontSize: 9, color: 'var(--text-3)' }}>
+              {node.cacheHitPercent > 60 ? '✓ warm cache' : node.cacheHitPercent > 0 ? 'warming up…' : 'cold start'}
+            </div>
+          </div>
+        </div>
+
+        {/* WAL inline row */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', background: 'var(--surface-1)', borderRadius: 7 }}>
+          <HardDrive size={11} style={{ color: 'var(--text-3)' }} />
+          <span style={{ fontSize: 10, color: 'var(--text-3)', flex: 1 }}>WAL log</span>
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>
+            {formatSize(node.walSizeBytes)}
+          </span>
+        </div>
+      </div>
+
+      {/* ── Controls ── */}
+      <div style={{
+        padding: '10px 14px',
+        borderTop: '1px solid var(--border-subtle)',
+        display: 'flex', gap: 8
+      }}>
         {!isKilled ? (
           <button
             onClick={() => onKill(node.id)}
-            className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold text-white bg-[var(--color-error)] hover:opacity-90 transition-opacity"
+            style={{
+              flex: 1, padding: '7px 0', borderRadius: 7, cursor: 'pointer',
+              fontSize: 11, fontWeight: 700, letterSpacing: '0.03em',
+              background: 'var(--red-bg)',
+              color: 'var(--red)',
+              border: '1px solid rgba(220,38,38,0.2)',
+              transition: 'opacity 0.15s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.opacity = '0.8')}
+            onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
           >
-            <Square size={14} fill="currentColor" /> Isolate Node
+            Isolate
           </button>
         ) : (
           <button
             onClick={() => onRestart(node.id)}
-            className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold text-white bg-[var(--color-success)] hover:opacity-90 transition-opacity"
+            style={{
+              flex: 1, padding: '7px 0', borderRadius: 7, cursor: 'pointer',
+              fontSize: 11, fontWeight: 700, letterSpacing: '0.03em',
+              background: 'var(--green-bg)',
+              color: 'var(--green)',
+              border: '1px solid rgba(22,163,74,0.2)',
+              transition: 'opacity 0.15s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.opacity = '0.8')}
+            onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
           >
-            <Play size={14} fill="currentColor" /> Heal Partition
+            Heal Partition
           </button>
         )}
 
-        {/* Compact button — only when node is UP */}
         <AnimatePresence>
           {isUp && (
             <motion.button
@@ -206,12 +316,21 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
               exit={{ opacity: 0, width: 0 }}
               onClick={handleCompact}
               disabled={compacting}
-              className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--color-brand-500)] text-[var(--color-brand-500)] hover:bg-[var(--color-brand-500)] hover:text-white transition-all disabled:opacity-60 whitespace-nowrap"
+              style={{
+                padding: '7px 14px', borderRadius: 7, cursor: 'pointer',
+                fontSize: 11, fontWeight: 700, letterSpacing: '0.03em',
+                background: 'transparent',
+                color: 'var(--accent)',
+                border: '1px solid var(--accent)',
+                display: 'flex', alignItems: 'center', gap: 5,
+                whiteSpace: 'nowrap',
+                opacity: compacting ? 0.6 : 1,
+                transition: 'opacity 0.15s, background 0.15s',
+              }}
+              onMouseEnter={e => !compacting && (e.currentTarget.style.background = 'var(--accent-subtle)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             >
-              {compacting
-                ? <><Loader2 size={13} className="animate-spin" /> Running…</>
-                : <><Save size={13} /> Compact</>
-              }
+              {compacting ? <><Loader2 size={12} className="animate-spin" />Running</> : <><RefreshCw size={12} />Compact</>}
             </motion.button>
           )}
         </AnimatePresence>

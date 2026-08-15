@@ -12,7 +12,7 @@ import java.util.Arrays;
  * </ul>
  *
  * <p>Records are produced by {@link WalWriter} and consumed by {@link WalReader}
- * during crash recovery inside {@link com.kvstore.engine.PersistentStorageEngine}.
+ * during crash recovery inside {@link com.kvstore.engine.LsmStorageEngine}.
  */
 public record WalEntry(WalOperation operation, String key, byte[] value) {
 

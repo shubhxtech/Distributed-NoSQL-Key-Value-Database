@@ -5,8 +5,7 @@ import java.util.Optional;
 /**
  * Core storage engine abstraction.
  *
- * <p>Day 1–2: Backed by {@link InMemoryStorageEngine} (ConcurrentHashMap).
- * Week 2: Replaced by {@code LsmStorageEngine} (WAL + Memtable + SSTables + Compaction).
+ * <p>Backed by {@code LsmStorageEngine} (WAL + Memtable + SSTables + Compaction).
  *
  * <p>All implementations must be thread-safe.
  */

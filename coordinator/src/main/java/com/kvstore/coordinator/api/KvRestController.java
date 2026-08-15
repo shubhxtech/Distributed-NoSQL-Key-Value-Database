@@ -7,7 +7,8 @@ import com.kvstore.coordinator.client.NodeGrpcClient;
 import com.kvstore.coordinator.config.NodeInfo;
 import com.kvstore.coordinator.monitoring.ClusterEvent;
 import com.kvstore.coordinator.monitoring.ClusterEventBus;
-import com.kvstore.coordinator.routing.SimpleRouter;
+import com.kvstore.coordinator.replication.ReplicationService;
+import com.kvstore.coordinator.routing.ConsistentHashRouter;
 import com.kvstore.proto.*;
 import io.grpc.StatusRuntimeException;
 import io.micrometer.core.instrument.Counter;
@@ -19,6 +20,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -32,31 +34,40 @@ import java.util.Map;
  *   GET    /api/v1/kv/_ping   — ping all nodes (health check)
  * </pre>
  *
- * <p>The controller delegates routing decisions to {@link SimpleRouter}
- * and actual gRPC calls to {@link NodeGrpcClient}.
+ * <p>The controller delegates routing decisions to {@link ConsistentHashRouter}
+ * (MD5 consistent hashing with 150 virtual nodes per physical node) and actual
+ * gRPC calls to {@link NodeGrpcClient}.
+ *
+ * <p>Every PUT and DELETE also fans out to all other live nodes via
+ * {@link ReplicationService} (full replication, RF = N) so that GET can be
+ * served from any node without a cache miss.
  */
 @RestController
 @RequestMapping("/api/v1/kv")
+@CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173"})
 public class KvRestController {
 
     private static final Logger log = LoggerFactory.getLogger(KvRestController.class);
 
-    private final SimpleRouter   router;
-    private final NodeGrpcClient nodeClient;
-    private final ClusterEventBus eventBus;
+    private final ConsistentHashRouter router;
+    private final NodeGrpcClient       nodeClient;
+    private final ClusterEventBus      eventBus;
+    private final ReplicationService   replicationService;
 
     private final Counter coordinatorPuts;
     private final Counter coordinatorGets;
     private final Counter coordinatorDeletes;
     private final Counter coordinatorErrors;
 
-    public KvRestController(SimpleRouter router,
+    public KvRestController(ConsistentHashRouter router,
                             NodeGrpcClient nodeClient,
                             ClusterEventBus eventBus,
+                            ReplicationService replicationService,
                             MeterRegistry meterRegistry) {
-        this.router     = router;
-        this.nodeClient = nodeClient;
-        this.eventBus   = eventBus;
+        this.router             = router;
+        this.nodeClient         = nodeClient;
+        this.eventBus           = eventBus;
+        this.replicationService = replicationService;
 
         coordinatorPuts    = Counter.builder("coordinator_puts_total").register(meterRegistry);
         coordinatorGets    = Counter.builder("coordinator_gets_total").register(meterRegistry);
@@ -81,29 +92,38 @@ public class KvRestController {
         coordinatorPuts.increment();
         long start = System.currentTimeMillis();
 
-        NodeInfo target = router.route(key);
+        // 1. Route to the primary owner via consistent hash.
+        NodeInfo primary = router.route(key);
+        PutRequest grpcRequest = PutRequest.newBuilder()
+                .setKey(key)
+                .setValue(ByteString.copyFrom(body.value(), StandardCharsets.UTF_8))
+                .setTtlMs(body.ttlMs())
+                .build();
         try {
-            PutResponse response = nodeClient.put(target.id(), PutRequest.newBuilder()
-                    .setKey(key)
-                    .setValue(ByteString.copyFrom(body.value(), StandardCharsets.UTF_8))
-                    .setTtlMs(body.ttlMs())
-                    .build());
+            PutResponse response = nodeClient.put(primary.id(), grpcRequest);
 
             double latency = System.currentTimeMillis() - start;
-            eventBus.publish(ClusterEvent.operation(target.id(), "PUT", key, latency, true));
+            eventBus.publish(ClusterEvent.operation(primary.id(), "PUT", key, latency, true));
+
+            // 2. Fan-out to all other live nodes asynchronously (RF = N).
+            List<NodeInfo> followers = router.liveNodes().stream()
+                    .filter(n -> !n.id().equals(primary.id()))
+                    .toList();
+            replicationService.replicatePut(followers, grpcRequest);
 
             return ResponseEntity.ok(Map.of(
                     "success",  response.getSuccess(),
                     "version",  response.getVersion(),
-                    "routedTo", target.id()
+                    "routedTo", primary.id(),
+                    "replicas", followers.stream().map(NodeInfo::id).toList()
             ));
         } catch (StatusRuntimeException e) {
             coordinatorErrors.increment();
-            eventBus.publish(ClusterEvent.operation(target.id(), "PUT", key, System.currentTimeMillis() - start, false));
-            log.error("gRPC PUT failed for key='{}' on node='{}': {}", key, target.id(), e.getStatus());
+            eventBus.publish(ClusterEvent.operation(primary.id(), "PUT", key, System.currentTimeMillis() - start, false));
+            log.error("gRPC PUT failed for key='{}' on node='{}': {}", key, primary.id(), e.getStatus());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                     .body(Map.of("error", "Node error: " + e.getStatus().getDescription(),
-                                 "routedTo", target.id()));
+                                 "routedTo", primary.id()));
         }
     }
 
@@ -121,28 +141,31 @@ public class KvRestController {
         coordinatorGets.increment();
         long start = System.currentTimeMillis();
 
-        NodeInfo target = router.route(key);
+        // GET always routes to the deterministic primary owner.
+        // Since RF=N all nodes hold the key, but routing to the primary
+        // keeps read path consistent with the write path.
+        NodeInfo primary = router.route(key);
         try {
-            GetResponse response = nodeClient.get(target.id(), GetRequest.newBuilder()
+            GetResponse response = nodeClient.get(primary.id(), GetRequest.newBuilder()
                     .setKey(key)
                     .build());
 
             double latency = System.currentTimeMillis() - start;
-            eventBus.publish(ClusterEvent.operation(target.id(), "GET", key, latency, response.getFound()));
+            eventBus.publish(ClusterEvent.operation(primary.id(), "GET", key, latency, response.getFound()));
 
             if (response.getFound()) {
                 String value = response.getValue().toString(StandardCharsets.UTF_8);
                 return ResponseEntity.ok(
                         GetValueResponse.found(value, response.getVersion(),
-                                               response.getTimestampMs(), target.id()));
+                                               response.getTimestampMs(), primary.id()));
             } else {
                 return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                        .body(GetValueResponse.notFound(target.id()));
+                        .body(GetValueResponse.notFound(primary.id()));
             }
         } catch (StatusRuntimeException e) {
             coordinatorErrors.increment();
-            eventBus.publish(ClusterEvent.operation(target.id(), "GET", key, System.currentTimeMillis() - start, false));
-            log.error("gRPC GET failed for key='{}' on node='{}': {}", key, target.id(), e.getStatus());
+            eventBus.publish(ClusterEvent.operation(primary.id(), "GET", key, System.currentTimeMillis() - start, false));
+            log.error("gRPC GET failed for key='{}' on node='{}': {}", key, primary.id(), e.getStatus());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
         }
     }
@@ -160,25 +183,31 @@ public class KvRestController {
         coordinatorDeletes.increment();
         long start = System.currentTimeMillis();
 
-        NodeInfo target = router.route(key);
+        NodeInfo primary = router.route(key);
+        DeleteRequest grpcRequest = DeleteRequest.newBuilder().setKey(key).build();
         try {
-            DeleteResponse response = nodeClient.delete(target.id(), DeleteRequest.newBuilder()
-                    .setKey(key)
-                    .build());
+            DeleteResponse response = nodeClient.delete(primary.id(), grpcRequest);
 
-            eventBus.publish(ClusterEvent.operation(target.id(), "DELETE", key, System.currentTimeMillis() - start, true));
+            eventBus.publish(ClusterEvent.operation(primary.id(), "DELETE", key, System.currentTimeMillis() - start, true));
+
+            // Fan-out tombstone to all other live nodes so no node keeps stale data.
+            List<NodeInfo> followers = router.liveNodes().stream()
+                    .filter(n -> !n.id().equals(primary.id()))
+                    .toList();
+            replicationService.replicateDelete(followers, grpcRequest);
 
             return ResponseEntity.ok(Map.of(
                     "success",  response.getSuccess(),
-                    "routedTo", target.id()
+                    "routedTo", primary.id(),
+                    "replicas", followers.stream().map(NodeInfo::id).toList()
             ));
         } catch (StatusRuntimeException e) {
             coordinatorErrors.increment();
-            eventBus.publish(ClusterEvent.operation(target.id(), "DELETE", key, System.currentTimeMillis() - start, false));
-            log.error("gRPC DELETE failed for key='{}' on node='{}': {}", key, target.id(), e.getStatus());
+            eventBus.publish(ClusterEvent.operation(primary.id(), "DELETE", key, System.currentTimeMillis() - start, false));
+            log.error("gRPC DELETE failed for key='{}' on node='{}': {}", key, primary.id(), e.getStatus());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                     .body(Map.of("error", "Node error: " + e.getStatus().getDescription(),
-                                 "routedTo", target.id()));
+                                 "routedTo", primary.id()));
         }
     }
 

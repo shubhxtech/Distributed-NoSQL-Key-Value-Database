@@ -1,7 +1,7 @@
 package com.kvstore.coordinator.monitoring;
 
 import com.kvstore.coordinator.config.ClusterProperties;
-import com.kvstore.coordinator.routing.SimpleRouter;
+import com.kvstore.coordinator.routing.ConsistentHashRouter;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -16,6 +16,7 @@ import java.util.Map;
  * <ul>
  *   <li>{@code GET  /api/v1/monitor/events}       — SSE stream of {@link ClusterEvent}s</li>
  *   <li>{@code GET  /api/v1/monitor/state}         — point-in-time cluster snapshot</li>
+ *   <li>{@code GET  /api/v1/monitor/ring}          — consistent-hash ring snapshot</li>
  *   <li>{@code POST /api/v1/monitor/nodes/{id}/kill}    — blacklist a node (simulated partition)</li>
  *   <li>{@code POST /api/v1/monitor/nodes/{id}/restart} — un-blacklist a node</li>
  * </ul>
@@ -27,16 +28,16 @@ import java.util.Map;
 @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173"})
 public class MonitoringController {
 
-    private final ClusterEventBus    eventBus;
-    private final ClusterProperties  clusterProperties;
-    private final SimpleRouter       router;
+    private final ClusterEventBus      eventBus;
+    private final ClusterProperties    clusterProperties;
+    private final ConsistentHashRouter router;
 
     public MonitoringController(ClusterEventBus eventBus,
                                 ClusterProperties clusterProperties,
-                                SimpleRouter router) {
-        this.eventBus         = eventBus;
+                                ConsistentHashRouter router) {
+        this.eventBus          = eventBus;
         this.clusterProperties = clusterProperties;
-        this.router           = router;
+        this.router            = router;
     }
 
     // ─── SSE stream ───────────────────────────────────────────────────────────
@@ -72,6 +73,18 @@ public class MonitoringController {
                                    .toList(),
                 "activeConnections", eventBus.activeConnections()
         ));
+    }
+
+    // ─── Ring snapshot ────────────────────────────────────────────────────────
+
+    /**
+     * Returns the current consistent-hash ring as a JSON array.
+     * Each element: {@code {"position": "hex…", "nodeId": "node-1"}}.
+     * Useful for the UI ring visualizer and debugging key placement.
+     */
+    @GetMapping("/ring")
+    public ResponseEntity<java.util.List<java.util.Map<String, String>>> ring() {
+        return ResponseEntity.ok(router.ringSnapshot());
     }
 
     // ─── Kill / Restart ────────────────────────────────────────────────────────

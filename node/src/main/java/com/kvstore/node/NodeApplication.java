@@ -23,9 +23,7 @@ import java.nio.file.Path;
  *   <li>Exposes an HTTP actuator endpoint for health checks and Prometheus metrics.</li>
  * </ol>
  *
- * <p><b>Day 1–2:</b> backed by {@code InMemoryStorageEngine} (no persistence).<br>
- * <b>Day 3–4:</b> backed by {@code PersistentStorageEngine} (WAL — survives crashes).<br>
- * <b>Day 5–6:</b> backed by {@link LsmStorageEngine} (WAL + SkipList memtable + SSTables).<br>
+ * <p><b>Day 5–6:</b> backed by {@link LsmStorageEngine} (WAL + SkipList memtable + SSTables).<br>
  * <b>Week 2:</b> will add background compaction + leader-follower replication.
  */
 @SpringBootApplication

@@ -348,6 +348,50 @@ public class LsmStorageEngine implements StorageEngine {
     public long cacheHitCount()   { return readCache.hitCount(); }
     public long cacheMissCount()  { return readCache.missCount(); }
     public int  cacheSize()       { return readCache.size(); }
+    
+    // ─── Debug Dump for UI ────────────────────────────────────────────────────
+    public Map<String, Object> getStorageStateDump() {
+        Map<String, Object> state = new LinkedHashMap<>();
+
+        // 1. Memtable state
+        Map<String, Object> memState = new LinkedHashMap<>();
+        memState.put("fillPercent", memtable.fillPercent());
+        memState.put("sizeBytes", memtable.sizeBytes());
+        memState.put("capacityBytes", memtableMaxBytes);
+        memState.put("entryCount", memtable.entryCount());
+        memState.put("liveCount", memtable.liveCount());
+        
+        var snapshot = memtable.snapshot();
+        List<Map<String, Object>> memKeys = snapshot.entrySet().stream()
+                .limit(50) // limit to avoid huge payload
+                .map(e -> {
+                    Map<String, Object> entry = new LinkedHashMap<>();
+                    entry.put("key", e.getKey());
+                    entry.put("value", e.getValue().tombstone() ? null : new String(e.getValue().value(), java.nio.charset.StandardCharsets.UTF_8));
+                    entry.put("tombstone", e.getValue().tombstone());
+                    return entry;
+                })
+                .collect(Collectors.toList());
+        memState.put("entries", memKeys);
+        state.put("memtable", memState);
+
+        // 2. SSTables state
+        List<Map<String, Object>> sstList = sstables.stream().map(sst -> {
+            var meta = sst.metadata();
+            Map<String, Object> sstMap = new LinkedHashMap<>();
+            sstMap.put("filename", meta.filename());
+            sstMap.put("entryCount", meta.entryCount());
+            sstMap.put("firstKey", meta.firstKey());
+            sstMap.put("lastKey", meta.lastKey());
+            sstMap.put("createdAtMs", meta.createdAtMs());
+            sstMap.put("sizeBytes", meta.sizeBytes());
+            sstMap.put("sizeHuman", meta.sizeHuman());
+            return sstMap;
+        }).collect(Collectors.toList());
+        state.put("sstables", sstList);
+
+        return state;
+    }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 

@@ -1,9 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { ClusterEvent } from '../hooks/useClusterStream';
-import { Activity, Save, ServerCrash,
-  ArrowUpCircle, ArrowDownCircle, Trash2, Layers, Filter
-} from 'lucide-react';
 
 interface TerminalLogProps {
   events: ClusterEvent[];
@@ -11,45 +8,59 @@ interface TerminalLogProps {
 
 type FilterType = 'ALL' | 'OPERATION' | 'SST_FLUSH' | 'NODE_STATUS' | 'COMPACTION';
 
-const OP_COLORS: Record<string, string> = {
-  PUT:    '#10b981',
-  GET:    '#60a5fa',
-  DELETE: '#f87171',
+// ─── Formatting helpers ────────────────────────────────────────────────────
+
+const OP_TOKENS: Record<string, { label: string; color: string }> = {
+  PUT:    { label: 'PUT',    color: 'var(--green)' },
+  GET:    { label: 'GET',    color: 'var(--blue)' },
+  DELETE: { label: 'DEL',   color: 'var(--red)' },
 };
 
-
-function getIcon(ev: ClusterEvent) {
-  if (ev.type === 'OPERATION') {
-    if (ev.op === 'PUT')    return <ArrowUpCircle size={13} style={{ color: OP_COLORS.PUT }} />;
-    if (ev.op === 'DELETE') return <Trash2 size={13} style={{ color: OP_COLORS.DELETE }} />;
-    return <ArrowDownCircle size={13} style={{ color: OP_COLORS.GET }} />;
-  }
-  if (ev.type === 'SST_FLUSH')   return <Save size={13} style={{ color: '#14b8a6' }} />;
-  if (ev.type === 'NODE_STATUS') return <ServerCrash size={13} style={{ color: '#f59e0b' }} />;
-  if (ev.type === 'COMPACTION')  return <Layers size={13} style={{ color: '#a78bfa' }} />;
-  return <Activity size={13} style={{ color: 'var(--color-text-muted)' }} />;
-}
-
-function getLabel(ev: ClusterEvent): { text: string; color?: string } {
+function lineFor(ev: ClusterEvent): { prefix: string; prefixColor: string; msg: string; msgColor: string; latency?: number } {
   switch (ev.type) {
     case 'OPERATION': {
-      const c = ev.success ? OP_COLORS[ev.op] ?? '' : '#f87171';
-      const status = ev.success ? 'OK' : 'FAIL';
+      const tok = OP_TOKENS[ev.op] ?? { label: ev.op, color: 'var(--text-3)' };
+      const key = ev.key.length > 22 ? ev.key.slice(0, 22) + '…' : ev.key;
+      const status = ev.success ? '' : ' ✗';
       return {
-        text: `${ev.op} ${ev.key.length > 18 ? ev.key.slice(0,18)+'…' : ev.key} → ${ev.nodeId} [${status}]`,
-        color: c,
+        prefix: tok.label, prefixColor: tok.color,
+        msg: `${key}  →  ${ev.nodeId}${status}`,
+        msgColor: ev.success ? 'var(--terminal-text)' : 'var(--red)',
+        latency: ev.latencyMs,
       };
     }
     case 'SST_FLUSH':
-      return { text: `FLUSH on ${ev.nodeId} · ${ev.extra?.sstableCount ?? '?'} SSTables total`, color: '#14b8a6' };
-    case 'NODE_STATUS':
-      return { text: `${ev.nodeId} → ${ev.extra?.status ?? '?'} (${ev.extra?.role ?? ''})`, color: '#f59e0b' };
+      return {
+        prefix: 'FLUSH', prefixColor: 'var(--accent)',
+        msg: `${ev.nodeId}  ·  ${ev.extra?.sstableCount ?? '?'} sstables`,
+        msgColor: 'var(--terminal-text)',
+      };
     case 'COMPACTION':
-      return { text: `COMPACTION on ${ev.nodeId} · ${ev.extra?.sstableCount ?? '?'} SSTables after`, color: '#a78bfa' };
+      return {
+        prefix: 'COMPACT', prefixColor: 'var(--purple)',
+        msg: `${ev.nodeId}  →  ${ev.extra?.sstableCount ?? '?'} files`,
+        msgColor: 'var(--terminal-text)',
+      };
+    case 'NODE_STATUS':
+      return {
+        prefix: 'NODE', prefixColor: 'var(--amber)',
+        msg: `${ev.nodeId}  ${ev.extra?.status ?? '?'}`,
+        msgColor: 'var(--terminal-text)',
+      };
     default:
-      return { text: `${ev.type} from ${ev.nodeId}` };
+      return { prefix: ev.type, prefixColor: 'var(--text-3)', msg: ev.nodeId, msgColor: 'var(--text-3)' };
   }
 }
+
+function fmtTime(ts?: number): string {
+  try {
+    const d = new Date(ts || Date.now());
+    if (isNaN(d.getTime())) return '  --:--:--';
+    return d.toISOString().split('T')[1].slice(0, 8);
+  } catch { return '  --:--:--'; }
+}
+
+// ─── Component ────────────────────────────────────────────────────────────
 
 export const TerminalLog: React.FC<TerminalLogProps> = ({ events }) => {
   const [filter, setFilter] = useState<FilterType>('ALL');
@@ -57,111 +68,148 @@ export const TerminalLog: React.FC<TerminalLogProps> = ({ events }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const filtered = events.filter(e => {
-    if (e.type === 'MEMTABLE') return false; // always hide low-level noise
-    if (filter === 'ALL') return true;
-    return e.type === filter;
+    if (e.type === 'MEMTABLE') return false;
+    return filter === 'ALL' || e.type === filter;
   });
 
-  // Auto-scroll to top (newest first)
   useEffect(() => {
-    if (autoScroll && scrollRef.current) {
-      scrollRef.current.scrollTop = 0;
-    }
+    if (autoScroll && scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [events, autoScroll]);
 
   const filters: { key: FilterType; label: string }[] = [
-    { key: 'ALL', label: 'All' },
-    { key: 'OPERATION', label: 'Ops' },
-    { key: 'SST_FLUSH', label: 'Flush' },
-    { key: 'COMPACTION', label: 'Compact' },
-    { key: 'NODE_STATUS', label: 'Status' },
+    { key: 'ALL', label: 'all' },
+    { key: 'OPERATION', label: 'ops' },
+    { key: 'SST_FLUSH', label: 'flush' },
+    { key: 'COMPACTION', label: 'compact' },
+    { key: 'NODE_STATUS', label: 'nodes' },
   ];
 
   return (
-    <div className="glass-card rounded-xl border border-[var(--color-border)] flex flex-col h-full overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-[var(--color-border)] flex-shrink-0">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
-          <Activity size={14} className="text-[var(--color-brand-500)]" />
-          Activity Stream
-          <span className="ml-1 text-[10px] bg-[var(--color-brand-500)] text-white rounded-full px-1.5 py-0.5 font-bold">
-            {filtered.length}
-          </span>
-        </h3>
-        <div className="flex items-center gap-1.5">
-          <Filter size={11} className="text-[var(--color-text-muted)]" />
-          {filters.map(f => (
-            <button
-              key={f.key}
-              onClick={() => setFilter(f.key)}
-              className="text-[10px] px-2 py-0.5 rounded-full font-semibold border transition-all"
-              style={{
-                borderColor: filter === f.key ? 'var(--color-brand-500)' : 'var(--color-border)',
-                color: filter === f.key ? 'var(--color-brand-500)' : 'var(--color-text-muted)',
-                background: filter === f.key ? 'rgba(20,184,166,0.1)' : 'transparent',
-              }}
-            >
-              {f.label}
-            </button>
-          ))}
+    <div style={{
+      display: 'flex', flexDirection: 'column',
+      background: 'var(--terminal-bg)',
+      border: '1px solid var(--terminal-border)',
+      borderRadius: 12,
+      overflow: 'hidden',
+      height: 560,
+    }}>
+
+      {/* ── Terminal titlebar ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center',
+        padding: '10px 14px',
+        borderBottom: '1px solid var(--terminal-border)',
+        background: 'var(--terminal-header)',
+        gap: 10,
+        flexShrink: 0,
+      }}>
+        {/* macOS-style dots */}
+        <div style={{ display: 'flex', gap: 5 }}>
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#f87171', opacity: 0.8 }} />
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#f59e0b', opacity: 0.8 }} />
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e', opacity: 0.8 }} />
+        </div>
+
+        <div style={{ flex: 1, textAlign: 'center', fontSize: 10, fontWeight: 600, color: 'var(--text-3)', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
+          kv-cluster — activity stream
+        </div>
+
+        {/* Event count badge */}
+        <div style={{
+          fontSize: 9, fontWeight: 700, fontFamily: 'var(--font-mono)',
+          color: 'var(--terminal-btn-text)',
+          background: 'var(--terminal-btn-bg)',
+          border: '1px solid var(--terminal-border)',
+          borderRadius: 4, padding: '2px 7px',
+        }}>
+          {filtered.length}
         </div>
       </div>
 
-      {/* Stream */}
+      {/* ── Filter row ── */}
+      <div style={{
+        display: 'flex', gap: 4, padding: '8px 14px',
+        borderBottom: '1px solid var(--terminal-border)',
+        background: 'var(--terminal-header)',
+        flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 9, color: 'var(--text-4)', fontFamily: 'var(--font-mono)', alignSelf: 'center', marginRight: 4 }}>
+          filter:
+        </span>
+        {filters.map(f => (
+          <button key={f.key} onClick={() => setFilter(f.key)} style={{
+            padding: '2px 10px', borderRadius: 4, cursor: 'pointer', fontFamily: 'var(--font-mono)',
+            fontSize: 10, fontWeight: 600,
+            background: filter === f.key ? 'var(--accent-subtle)' : 'transparent',
+            color: filter === f.key ? 'var(--accent)' : 'var(--terminal-btn-text)',
+            border: filter === f.key ? '1px solid var(--accent-muted)' : '1px solid transparent',
+            transition: 'all 0.12s',
+          }}>
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Log lines ── */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto px-3 py-2 space-y-0.5 custom-scrollbar font-mono text-xs"
         onMouseEnter={() => setAutoScroll(false)}
         onMouseLeave={() => setAutoScroll(true)}
+        style={{
+          flex: 1, overflowY: 'auto',
+          padding: '8px 0',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          lineHeight: 1.7,
+        }}
       >
         <AnimatePresence initial={false}>
-          {filtered.map((ev) => {
-            const { text, color } = getLabel(ev);
-            const latency = ev.latencyMs ?? 0;
-            const maxLatBar = 200; // ms cap for bar width
-            const barW = Math.min(100, (latency / maxLatBar) * 100);
-            const ts = (() => {
-              try {
-                const d = new Date(ev.timestampMs || Date.now());
-                if (isNaN(d.getTime())) return '??:??:??';
-                return d.toISOString().split('T')[1].slice(0, 8);
-              } catch { return '??:??:??'; }
-            })();
+          {filtered.map(ev => {
+            const { prefix, prefixColor, msg, msgColor, latency } = lineFor(ev);
+            const maxBar = 200;
+            const barW = latency ? Math.min(100, (latency / maxBar) * 100) : 0;
+            const barColor = latency && latency > 100 ? 'var(--amber)' : latency && latency > 30 ? 'var(--blue)' : 'var(--green)';
 
             return (
               <motion.div
                 key={ev.id}
-                layout
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.18 }}
-                className="flex items-center gap-2 py-1 px-2 rounded-lg hover:bg-[var(--color-surface-hover)] transition-colors group"
+                initial={{ opacity: 0, x: -4 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: 0.12 }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 0,
+                  padding: '0 14px',
+                  transition: 'background 0.1s',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-1)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               >
-                {/* Icon */}
-                <div className="flex-shrink-0">{getIcon(ev)}</div>
-
                 {/* Timestamp */}
-                <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0">{ts}</span>
-
-                {/* Message */}
-                <span className="flex-1 truncate" style={{ color: color || 'var(--color-text-secondary)' }}>
-                  {text}
+                <span style={{ color: 'var(--terminal-timestamp)', width: 62, flexShrink: 0 }}>
+                  {fmtTime(ev.timestampMs)}
                 </span>
 
-                {/* Latency bar (only for OPERATION) */}
-                {ev.type === 'OPERATION' && latency > 0 && (
-                  <div className="flex items-center gap-1.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <div className="w-14 h-1.5 rounded-full bg-[var(--color-border)] overflow-hidden">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${barW}%`,
-                          background: latency > 100 ? '#f59e0b' : latency > 50 ? '#60a5fa' : '#10b981',
-                        }}
-                      />
+                {/* Op label */}
+                <span style={{
+                  color: prefixColor, width: 58, flexShrink: 0,
+                  fontWeight: 700, fontSize: 10, letterSpacing: '0.04em',
+                }}>
+                  {prefix}
+                </span>
+
+                {/* Message */}
+                <span style={{ color: msgColor, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {msg}
+                </span>
+
+                {/* Latency mini-bar */}
+                {latency != null && latency > 0 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, marginLeft: 8 }}>
+                    <div style={{ width: 36, height: 3, background: 'var(--terminal-border)', borderRadius: 99, overflow: 'hidden' }}>
+                      <div style={{ width: `${barW}%`, height: '100%', background: barColor, borderRadius: 99 }} />
                     </div>
-                    <span className="text-[9px] text-[var(--color-text-muted)] w-10 text-right">
-                      {latency.toFixed(1)}ms
+                    <span style={{ color: 'var(--terminal-timestamp)', fontSize: 9, width: 30, textAlign: 'right' }}>
+                      {latency.toFixed(0)}ms
                     </span>
                   </div>
                 )}
@@ -171,20 +219,31 @@ export const TerminalLog: React.FC<TerminalLogProps> = ({ events }) => {
         </AnimatePresence>
 
         {filtered.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-40 text-[var(--color-text-muted)]">
-            <Activity size={28} className="mb-3 opacity-30" />
-            <p className="text-xs">Waiting for cluster events…</p>
+          <div style={{ padding: '40px 20px', textAlign: 'center' }}>
+            <div style={{ fontSize: 11, color: 'var(--terminal-timestamp)', fontFamily: 'var(--font-mono)' }}>
+              $ waiting for events...
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <span style={{ fontSize: 11, color: 'var(--accent)', fontFamily: 'var(--font-mono)' }}>▋</span>
+            </div>
           </div>
         )}
       </div>
 
-      {/* Footer: auto-scroll hint */}
-      <div className="px-4 py-1.5 border-t border-[var(--color-border)] flex items-center justify-between flex-shrink-0">
-        <span className="text-[10px] text-[var(--color-text-muted)]">
-          {autoScroll ? '⬆ auto-scroll on' : '⏸ hover paused'}
+      {/* ── Footer ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '6px 14px',
+        borderTop: '1px solid var(--terminal-border)',
+        background: 'var(--terminal-header)',
+        flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 9, color: 'var(--terminal-timestamp)', fontFamily: 'var(--font-mono)' }}>
+          {autoScroll ? '↑ auto-scroll' : '⏸ paused'}
         </span>
-        <span className="text-[10px] text-[var(--color-text-muted)]">
-          {events.length} total events
+        <span style={{ fontSize: 9, color: 'var(--terminal-timestamp)', fontFamily: 'var(--font-mono)' }}>
+          {events.length} events
         </span>
       </div>
     </div>
