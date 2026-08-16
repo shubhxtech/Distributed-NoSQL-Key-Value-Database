@@ -17,6 +17,7 @@ dependencies {
     // Project dependencies
     implementation project(':proto')
     implementation project(':storage-engine')
+    implementation project(':raft')          // Raft state machine + gRPC transport
 
     // Spring Boot
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
