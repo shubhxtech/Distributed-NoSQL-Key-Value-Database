@@ -48,64 +48,68 @@ This project is a ground-up implementation of a distributed, sharded key-value d
 
 ## Architecture
 
-```
-┌─────────────────────────────────────┐
-│            REST Client              │
-│   curl / Java SDK / Dashboard UI    │
-└──────────────┬──────────────────────┘
-               │ HTTP :8080
-               ▼
-┌─────────────────────────────────────┐
-│            Coordinator              │
-│        (Spring Boot :8080)          │
-│                                     │
-│  ┌─────────────────────────────┐   │
-│  │   ConsistentHashRouter      │   │
-│  │   MD5 ring · 150 VNodes     │   │
-│  │   ConcurrentSkipListMap     │   │
-│  └──────────┬──────────────────┘   │
-│             │ gRPC (Protocol Buffers)│
-└─────────────┼───────────────────────┘
-         ┌────┴────┐
-         │         │
-    ┌────┴───┐  ┌──┴────┐  ┌───────┐
-    │ Node-1 │  │ Node-2 │  │ Node-3│
-    │  :9091 │  │  :9092 │  │  :9093│
-    └────┬───┘  └──┬────┘  └───┬───┘
-         │         │            │
-    ┌────┴─────────┴────────────┴────┐
-    │         Per-Node Stack          │
-    │                                 │
-    │  ┌───────────────────────────┐ │
-    │  │     Raft State Machine    │ │
-    │  │  LEADER / FOLLOWER /      │ │
-    │  │  CANDIDATE  (port :918x)  │ │
-    │  └───────────┬───────────────┘ │
-    │              │ on commit        │
-    │  ┌───────────▼───────────────┐ │
-    │  │    LsmStorageEngine       │ │
-    │  │                           │ │
-    │  │  WAL (fsync)              │ │
-    │  │    └► SkipListMemtable    │ │
-    │  │         └► SSTables (.sst)│ │
-    │  │              └► Compaction│ │
-    │  │                           │ │
-    │  │  Read: Bloom Filter       │ │
-    │  │         └► LRU Cache      │ │
-    │  │              └► SSTable   │ │
-    │  └───────────────────────────┘ │
-    └─────────────────────────────────┘
+```mermaid
+flowchart TD
+    Client["REST Client\ncurl / Java SDK / Dashboard UI"]
 
-    ┌──────────────┐   ┌──────────────┐
-    │  Prometheus  │   │   Grafana    │
-    │    :9090     │──►│    :3000     │
-    └──────────────┘   └──────────────┘
+    subgraph Coordinator["Coordinator  :8080"]
+        Router["ConsistentHashRouter\nMD5 ring · 150 VNodes\nConcurrentSkipListMap"]
+    end
 
-    ┌──────────────────────────────────┐
-    │     React Dashboard (Vite)       │
-    │       http://localhost:5173      │
-    │  Hash Ring · Node Cards · Logs   │
-    └──────────────────────────────────┘
+    subgraph Node1["Node-1  :9091 gRPC / :9181 Raft"]
+        Raft1["Raft State Machine"]
+        LSM1["LsmStorageEngine\nWAL → Memtable → SSTables\nBloom Filter + LRU Cache"]
+        Raft1 -->|"commit"| LSM1
+    end
+
+    subgraph Node2["Node-2  :9092 gRPC / :9182 Raft"]
+        Raft2["Raft State Machine"]
+        LSM2["LsmStorageEngine"]
+        Raft2 -->|"commit"| LSM2
+    end
+
+    subgraph Node3["Node-3  :9093 gRPC / :9183 Raft"]
+        Raft3["Raft State Machine"]
+        LSM3["LsmStorageEngine"]
+        Raft3 -->|"commit"| LSM3
+    end
+
+    Prometheus["Prometheus  :9090"]
+    Grafana["Grafana  :3000"]
+    UI["React Dashboard  :5173"]
+
+    Client -->|"HTTP :8080"| Router
+    Router -->|"gRPC"| Node1
+    Router -->|"gRPC"| Node2
+    Router -->|"gRPC"| Node3
+
+    Node1 <-->|"Raft RPCs"| Node2
+    Node2 <-->|"Raft RPCs"| Node3
+    Node1 <-->|"Raft RPCs"| Node3
+
+    Node1 -->|"metrics"| Prometheus
+    Node2 -->|"metrics"| Prometheus
+    Node3 -->|"metrics"| Prometheus
+    Coordinator -->|"metrics"| Prometheus
+    Prometheus --> Grafana
+
+    Coordinator -->|"SSE stream"| UI
+
+    style Client fill:#ffffff,stroke:#333,color:#000
+    style Coordinator fill:#f0f0f0,stroke:#333,color:#000
+    style Router fill:#e0e0e0,stroke:#555,color:#000
+    style Node1 fill:#f8f8f8,stroke:#555,color:#000
+    style Node2 fill:#f8f8f8,stroke:#555,color:#000
+    style Node3 fill:#f8f8f8,stroke:#555,color:#000
+    style Raft1 fill:#e8e8e8,stroke:#666,color:#000
+    style Raft2 fill:#e8e8e8,stroke:#666,color:#000
+    style Raft3 fill:#e8e8e8,stroke:#666,color:#000
+    style LSM1 fill:#ffffff,stroke:#999,color:#000
+    style LSM2 fill:#ffffff,stroke:#999,color:#000
+    style LSM3 fill:#ffffff,stroke:#999,color:#000
+    style Prometheus fill:#f0f0f0,stroke:#555,color:#000
+    style Grafana fill:#f0f0f0,stroke:#555,color:#000
+    style UI fill:#f0f0f0,stroke:#555,color:#000
 ```
 
 ---
@@ -131,50 +135,88 @@ The storage engine is a complete Log-Structured Merge-Tree implementation, follo
 
 ### Write Path
 
-```
-put("key", "value")
-       │
-       ├─► WalWriter.append()         ← fsync to disk first (durability)
-       │
-       └─► SkipListMemtable.put()     ← ConcurrentSkipListMap (sorted, lock-free reads)
-                   │
-                   │  when memtableFillPercent >= 100%  (default: 8 MB)
-                   ▼
-           SSTableWriter.write()      ← immutable sorted file on disk (.sst)
-           new empty memtable         ← old WAL segment deleted (data safe in SSTable)
+```mermaid
+flowchart LR
+    W["put(key, value)"]
+    WAL["WalWriter\nfsync to disk"]
+    MEM["SkipListMemtable\nConcurrentSkipListMap"]
+    FLUSH{"memtable\nfull?"}
+    SST["SSTableWriter\nimmutable .sst file"]
+    NEWMEM["new empty Memtable\nold WAL deleted"]
+
+    W --> WAL
+    W --> MEM
+    MEM --> FLUSH
+    FLUSH -->|"yes — 8 MB"| SST
+    SST --> NEWMEM
+
+    style W fill:#ffffff,stroke:#333,color:#000
+    style WAL fill:#e0e0e0,stroke:#555,color:#000
+    style MEM fill:#e0e0e0,stroke:#555,color:#000
+    style FLUSH fill:#c8c8c8,stroke:#555,color:#000
+    style SST fill:#f0f0f0,stroke:#555,color:#000
+    style NEWMEM fill:#f8f8f8,stroke:#999,color:#000
 ```
 
 ### Read Path
 
-```
-get("key")
-       │
-       ├─► 1. SkipListMemtable        ← O(log n), in-memory, fastest path
-       │
-       └─► 2. SSTables (newest → oldest)
-                   │
-                   ├─► BloomFilter.mightContain()    ← skip file if definitely absent
-                   ├─► SSTableMetadata key-range check
-                   ├─► Binary search sparse index
-                   └─► Linear scan data block
-                               │
-                               └─► tombstone = deleted, first match wins
+```mermaid
+flowchart TD
+    G["get(key)"]
+    MEM["1. SkipListMemtable\nO(log n) · no disk I/O"]
+    HIT1{"found?"}
+    BLOOM["BloomFilter.mightContain()\nskip file if definitely absent"]
+    RANGE["key-range pre-filter"]
+    IDX["binary search sparse index"]
+    SCAN["linear scan data block"]
+    HIT2{"tombstone?"}
+    RESULT_HIT["return value"]
+    RESULT_MISS["not found"]
+    RESULT_DEL["return deleted"]
+
+    G --> MEM
+    MEM --> HIT1
+    HIT1 -->|"yes"| RESULT_HIT
+    HIT1 -->|"no"| BLOOM
+    BLOOM --> RANGE
+    RANGE --> IDX
+    IDX --> SCAN
+    SCAN --> HIT2
+    HIT2 -->|"no — value found"| RESULT_HIT
+    HIT2 -->|"yes — deleted"| RESULT_DEL
+    SCAN -->|"exhausted all SSTables"| RESULT_MISS
+
+    style G fill:#ffffff,stroke:#333,color:#000
+    style MEM fill:#e0e0e0,stroke:#555,color:#000
+    style HIT1 fill:#c8c8c8,stroke:#555,color:#000
+    style BLOOM fill:#e8e8e8,stroke:#666,color:#000
+    style RANGE fill:#e8e8e8,stroke:#666,color:#000
+    style IDX fill:#e8e8e8,stroke:#666,color:#000
+    style SCAN fill:#e8e8e8,stroke:#666,color:#000
+    style HIT2 fill:#c8c8c8,stroke:#555,color:#000
+    style RESULT_HIT fill:#f0f0f0,stroke:#555,color:#000
+    style RESULT_MISS fill:#f0f0f0,stroke:#999,color:#555
+    style RESULT_DEL fill:#f0f0f0,stroke:#999,color:#555
 ```
 
-### SSTable Format
+### SSTable File Format
 
-Each `.sst` file has four sections written as a single sequential write:
+Each `.sst` file is a single sequential write with four sections:
 
-```
-┌─────────────────┐
-│   Data Block    │  sorted key-value records (8-byte length-prefixed)
-├─────────────────┤
-│  Sparse Index   │  every Nth key → byte offset into data block
-├─────────────────┤
-│  Bloom Filter   │  serialized bit array (MurmurHash, ≈1% false-positive rate)
-├─────────────────┤
-│     Footer      │  8-byte offsets to index start + bloom start
-└─────────────────┘
+```mermaid
+block-beta
+    columns 1
+    block:file
+        DataBlock["Data Block\nsorted key-value records · 8-byte length-prefixed"]
+        SparseIndex["Sparse Index\nevery Nth key → byte offset into Data Block"]
+        BloomFilter["Bloom Filter\nMurmurHash bit array · ~1% false-positive rate"]
+        Footer["Footer\n8-byte offsets: index_start | bloom_start"]
+    end
+
+    style DataBlock fill:#f8f8f8,stroke:#555,color:#000
+    style SparseIndex fill:#efefef,stroke:#555,color:#000
+    style BloomFilter fill:#e8e8e8,stroke:#555,color:#000
+    style Footer fill:#e0e0e0,stroke:#555,color:#000
 ```
 
 ### Compaction
@@ -227,36 +269,51 @@ Each storage node runs a `RaftNode` — a complete implementation of the Raft co
 | Spring Boot lifecycle integration (`SmartLifecycle`) | ✅ |
 | Persistent state (term + votedFor flushed to disk) | 🔄 In progress |
 
-### Raft RPC Flow
+### Raft Write Flow
 
-```
-Client PUT request
-        │
-        ▼
-Coordinator ──gRPC──► Leader Node
-                           │
-                    RaftNode.appendEntry()
-                           │
-                    Replicate via AppendEntries
-                    to all peer nodes
-                           │
-                    majority ACK (2/3 nodes)
-                           │
-                    commitIndex advances
-                           │
-                    stateMachineApplier.accept()
-                           │
-                    LsmStorageEngine.put()
-                           │
-                    gRPC response → coordinator
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CO as Coordinator
+    participant L as Leader Node
+    participant F1 as Follower 1
+    participant F2 as Follower 2
+
+    C->>CO: PUT /api/v1/kv/key
+    CO->>L: gRPC KvService/Put
+    L->>L: RaftNode.appendEntry()
+    L->>F1: AppendEntries RPC
+    L->>F2: AppendEntries RPC
+    F1-->>L: ACK
+    F2-->>L: ACK
+    Note over L: quorum reached (2/3)
+    L->>L: commitIndex advances
+    L->>L: stateMachineApplier → LsmStorageEngine.put()
+    L-->>CO: gRPC response
+    CO-->>C: 200 OK
+
+    note over F1,F2: Heartbeat every 50ms resets election timer
 ```
 
 ### Raft Role Visualization
 
 The live dashboard shows each node's current Raft role in real-time:
 
-- 👑 **LEADER** — amber border + crown badge
-- **FOLLOWER** — normal appearance  
+```mermaid
+stateDiagram-v2
+    [*] --> FOLLOWER : startup
+
+    FOLLOWER --> CANDIDATE : election timeout\n(150–300ms random)
+    CANDIDATE --> LEADER : votes from majority
+    CANDIDATE --> FOLLOWER : higher term seen\nor split vote timeout
+    LEADER --> FOLLOWER : higher term seen\nfrom peer
+
+    LEADER --> LEADER : heartbeat every 50ms
+    FOLLOWER --> FOLLOWER : heartbeat received\n(timer reset)
+```
+
+- 👑 **LEADER** — amber border + crown badge in dashboard
+- **FOLLOWER** — normal appearance
 - **CANDIDATE** — purple badge (mid-election)
 
 ---
@@ -282,7 +339,7 @@ The React dashboard (`/ui`) connects to the coordinator's SSE stream (`GET /api/
 Every node exports metrics via Micrometer at `/actuator/prometheus`. Prometheus scrapes all 4 services every 15s. Key metrics:
 
 - `jvm_memory_used_bytes` — heap pressure
-- `http_server_requests_seconds` — request latency histograms  
+- `http_server_requests_seconds` — request latency histograms
 - `grpc_server_requests_total` — gRPC call counts
 - Custom: memtable fill %, WAL bytes, SSTable count (via `/api/v1/storage/state`)
 
