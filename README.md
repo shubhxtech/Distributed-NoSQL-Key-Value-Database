@@ -74,8 +74,8 @@ flowchart TD
     Client -->|HTTP :8080| Coordinator
     Coordinator -.->|SSE| UI
     Coordinator -->|gRPC| Node1 & Node2 & Node3
-    Node1 <..>|Raft| Node2 & Node3
-    Node2 <..>|Raft| Node3
+    Node1 <-.->|Raft| Node2 & Node3
+    Node2 <-.->|Raft| Node3
     
     Cluster -.->|Scrape :actuator| Prometheus
     Prometheus --> Grafana
