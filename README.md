@@ -50,66 +50,35 @@ This project is a ground-up implementation of a distributed, sharded key-value d
 
 ```mermaid
 flowchart TD
-    Client["REST Client\ncurl / Java SDK / Dashboard UI"]
+    classDef client fill:#fff,stroke:#333,stroke-width:2px,color:#000
+    classDef coord fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000,stroke-dasharray: 5 5
+    classDef node fill:#fff,stroke:#333,stroke-width:2px,color:#000
+    classDef comp fill:#fafafa,stroke:#999,stroke-width:1px,color:#333
+    classDef obs fill:#eee,stroke:#999,stroke-width:1px,color:#000
 
-    subgraph Coordinator["Coordinator  :8080"]
-        Router["ConsistentHashRouter\nMD5 ring · 150 VNodes\nConcurrentSkipListMap"]
+    Client(["REST Client / Java SDK / UI"]):::client
+    UI(["React Dashboard :5173"]):::obs
+    
+    subgraph Cluster["KV Cluster"]
+        Coordinator["Coordinator\nConsistent Hash Router"]:::coord
+        Node1["Node-1\ngRPC:9091\nRaft:9181"]:::node
+        Node2["Node-2\ngRPC:9092\nRaft:9182"]:::node
+        Node3["Node-3\ngRPC:9093\nRaft:9183"]:::node
+    end
+    
+    subgraph Observability["Observability"]
+        Prometheus["Prometheus"]:::obs
+        Grafana["Grafana"]:::obs
     end
 
-    subgraph Node1["Node-1  :9091 gRPC / :9181 Raft"]
-        Raft1["Raft State Machine"]
-        LSM1["LsmStorageEngine\nWAL → Memtable → SSTables\nBloom Filter + LRU Cache"]
-        Raft1 -->|"commit"| LSM1
-    end
-
-    subgraph Node2["Node-2  :9092 gRPC / :9182 Raft"]
-        Raft2["Raft State Machine"]
-        LSM2["LsmStorageEngine"]
-        Raft2 -->|"commit"| LSM2
-    end
-
-    subgraph Node3["Node-3  :9093 gRPC / :9183 Raft"]
-        Raft3["Raft State Machine"]
-        LSM3["LsmStorageEngine"]
-        Raft3 -->|"commit"| LSM3
-    end
-
-    Prometheus["Prometheus  :9090"]
-    Grafana["Grafana  :3000"]
-    UI["React Dashboard  :5173"]
-
-    Client -->|"HTTP :8080"| Router
-    Router -->|"gRPC"| Node1
-    Router -->|"gRPC"| Node2
-    Router -->|"gRPC"| Node3
-
-    Node1 <-->|"Raft RPCs"| Node2
-    Node2 <-->|"Raft RPCs"| Node3
-    Node1 <-->|"Raft RPCs"| Node3
-
-    Node1 -->|"metrics"| Prometheus
-    Node2 -->|"metrics"| Prometheus
-    Node3 -->|"metrics"| Prometheus
-    Coordinator -->|"metrics"| Prometheus
+    Client -->|HTTP :8080| Coordinator
+    Coordinator -.->|SSE| UI
+    Coordinator -->|gRPC| Node1 & Node2 & Node3
+    Node1 <..>|Raft| Node2 & Node3
+    Node2 <..>|Raft| Node3
+    
+    Cluster -.->|Scrape :actuator| Prometheus
     Prometheus --> Grafana
-
-    Coordinator -->|"SSE stream"| UI
-
-    style Client fill:#ffffff,stroke:#333,color:#000
-    style Coordinator fill:#f0f0f0,stroke:#333,color:#000
-    style Router fill:#e0e0e0,stroke:#555,color:#000
-    style Node1 fill:#f8f8f8,stroke:#555,color:#000
-    style Node2 fill:#f8f8f8,stroke:#555,color:#000
-    style Node3 fill:#f8f8f8,stroke:#555,color:#000
-    style Raft1 fill:#e8e8e8,stroke:#666,color:#000
-    style Raft2 fill:#e8e8e8,stroke:#666,color:#000
-    style Raft3 fill:#e8e8e8,stroke:#666,color:#000
-    style LSM1 fill:#ffffff,stroke:#999,color:#000
-    style LSM2 fill:#ffffff,stroke:#999,color:#000
-    style LSM3 fill:#ffffff,stroke:#999,color:#000
-    style Prometheus fill:#f0f0f0,stroke:#555,color:#000
-    style Grafana fill:#f0f0f0,stroke:#555,color:#000
-    style UI fill:#f0f0f0,stroke:#555,color:#000
 ```
 
 ---
@@ -137,66 +106,52 @@ The storage engine is a complete Log-Structured Merge-Tree implementation, follo
 
 ```mermaid
 flowchart LR
-    W["put(key, value)"]
-    WAL["WalWriter\nfsync to disk"]
-    MEM["SkipListMemtable\nConcurrentSkipListMap"]
-    FLUSH{"memtable\nfull?"}
-    SST["SSTableWriter\nimmutable .sst file"]
-    NEWMEM["new empty Memtable\nold WAL deleted"]
+    classDef default fill:#fff,stroke:#666,stroke-width:1px,color:#000
+    classDef start fill:#f0f0f0,stroke:#333,stroke-width:2px,color:#000
+    classDef decision fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
+    
+    W(["put(key, value)"]):::start
+    WAL["WalWriter\n(fsync)"]
+    MEM["SkipListMemtable\n(memory)"]
+    FLUSH{"Full?"}:::decision
+    SST["SSTableWriter\n(.sst)"]
+    NEWMEM["New Memtable"]
 
-    W --> WAL
-    W --> MEM
+    W --> WAL & MEM
     MEM --> FLUSH
-    FLUSH -->|"yes — 8 MB"| SST
+    FLUSH -->|"≥ 8MB"| SST
     SST --> NEWMEM
-
-    style W fill:#ffffff,stroke:#333,color:#000
-    style WAL fill:#e0e0e0,stroke:#555,color:#000
-    style MEM fill:#e0e0e0,stroke:#555,color:#000
-    style FLUSH fill:#c8c8c8,stroke:#555,color:#000
-    style SST fill:#f0f0f0,stroke:#555,color:#000
-    style NEWMEM fill:#f8f8f8,stroke:#999,color:#000
 ```
 
 ### Read Path
 
 ```mermaid
 flowchart TD
-    G["get(key)"]
-    MEM["1. SkipListMemtable\nO(log n) · no disk I/O"]
-    HIT1{"found?"}
-    BLOOM["BloomFilter.mightContain()\nskip file if definitely absent"]
-    RANGE["key-range pre-filter"]
-    IDX["binary search sparse index"]
-    SCAN["linear scan data block"]
-    HIT2{"tombstone?"}
-    RESULT_HIT["return value"]
-    RESULT_MISS["not found"]
-    RESULT_DEL["return deleted"]
+    classDef default fill:#fff,stroke:#666,stroke-width:1px,color:#000
+    classDef start fill:#f0f0f0,stroke:#333,stroke-width:2px,color:#000
+    classDef decision fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
+    classDef endNode fill:#f9f9f9,stroke:#999,stroke-width:1px,color:#666,stroke-dasharray: 4 4
+    
+    G(["get(key)"]):::start
+    MEM["SkipListMemtable"]
+    HIT1{"Found?"}:::decision
+    BLOOM["Bloom Filter\n(might contain?)"]
+    RANGE["Key Range\nPre-filter"]
+    IDX["Binary Search\n(Sparse Index)"]
+    SCAN["Linear Scan\n(Data Block)"]
+    HIT2{"Tombstone?"}:::decision
+    
+    RESULT_HIT(["Return Value"]):::endNode
+    RESULT_MISS(["Not Found"]):::endNode
+    RESULT_DEL(["Return Deleted"]):::endNode
 
-    G --> MEM
-    MEM --> HIT1
-    HIT1 -->|"yes"| RESULT_HIT
-    HIT1 -->|"no"| BLOOM
-    BLOOM --> RANGE
-    RANGE --> IDX
-    IDX --> SCAN
-    SCAN --> HIT2
-    HIT2 -->|"no — value found"| RESULT_HIT
-    HIT2 -->|"yes — deleted"| RESULT_DEL
-    SCAN -->|"exhausted all SSTables"| RESULT_MISS
-
-    style G fill:#ffffff,stroke:#333,color:#000
-    style MEM fill:#e0e0e0,stroke:#555,color:#000
-    style HIT1 fill:#c8c8c8,stroke:#555,color:#000
-    style BLOOM fill:#e8e8e8,stroke:#666,color:#000
-    style RANGE fill:#e8e8e8,stroke:#666,color:#000
-    style IDX fill:#e8e8e8,stroke:#666,color:#000
-    style SCAN fill:#e8e8e8,stroke:#666,color:#000
-    style HIT2 fill:#c8c8c8,stroke:#555,color:#000
-    style RESULT_HIT fill:#f0f0f0,stroke:#555,color:#000
-    style RESULT_MISS fill:#f0f0f0,stroke:#999,color:#555
-    style RESULT_DEL fill:#f0f0f0,stroke:#999,color:#555
+    G --> MEM --> HIT1
+    HIT1 -->|"Yes"| RESULT_HIT
+    HIT1 -->|"No"| BLOOM
+    BLOOM --> RANGE --> IDX --> SCAN --> HIT2
+    HIT2 -->|"No (Value)"| RESULT_HIT
+    HIT2 -->|"Yes (Deleted)"| RESULT_DEL
+    SCAN -->|"Exhausted"| RESULT_MISS
 ```
 
 ### SSTable File Format
@@ -207,16 +162,16 @@ Each `.sst` file is a single sequential write with four sections:
 block-beta
     columns 1
     block:file
-        DataBlock["Data Block\nsorted key-value records · 8-byte length-prefixed"]
-        SparseIndex["Sparse Index\nevery Nth key → byte offset into Data Block"]
-        BloomFilter["Bloom Filter\nMurmurHash bit array · ~1% false-positive rate"]
-        Footer["Footer\n8-byte offsets: index_start | bloom_start"]
+        DataBlock["Data Block (sorted KV)"]
+        SparseIndex["Sparse Index"]
+        BloomFilter["Bloom Filter"]
+        Footer["Footer (offsets)"]
     end
 
-    style DataBlock fill:#f8f8f8,stroke:#555,color:#000
-    style SparseIndex fill:#efefef,stroke:#555,color:#000
-    style BloomFilter fill:#e8e8e8,stroke:#555,color:#000
-    style Footer fill:#e0e0e0,stroke:#555,color:#000
+    style DataBlock fill:#fff,stroke:#666,color:#000
+    style SparseIndex fill:#f9f9f9,stroke:#666,color:#000
+    style BloomFilter fill:#f0f0f0,stroke:#666,color:#000
+    style Footer fill:#e8e8e8,stroke:#666,color:#000
 ```
 
 ### Compaction
@@ -276,23 +231,20 @@ sequenceDiagram
     participant C as Client
     participant CO as Coordinator
     participant L as Leader Node
-    participant F1 as Follower 1
-    participant F2 as Follower 2
+    participant F as Followers (2)
 
     C->>CO: PUT /api/v1/kv/key
     CO->>L: gRPC KvService/Put
-    L->>L: RaftNode.appendEntry()
-    L->>F1: AppendEntries RPC
-    L->>F2: AppendEntries RPC
-    F1-->>L: ACK
-    F2-->>L: ACK
-    Note over L: quorum reached (2/3)
-    L->>L: commitIndex advances
-    L->>L: stateMachineApplier → LsmStorageEngine.put()
+    activate L
+    L->>L: appendEntry()
+    L->>F: AppendEntries RPC
+    F-->>L: ACK
+    Note over L: Quorum Reached
+    L->>L: commitIndex++
+    L->>L: LsmStorageEngine.put()
     L-->>CO: gRPC response
+    deactivate L
     CO-->>C: 200 OK
-
-    note over F1,F2: Heartbeat every 50ms resets election timer
 ```
 
 ### Raft Role Visualization
@@ -301,15 +253,15 @@ The live dashboard shows each node's current Raft role in real-time:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> FOLLOWER : startup
+    [*] --> FOLLOWER: Startup
 
-    FOLLOWER --> CANDIDATE : election timeout\n(150–300ms random)
-    CANDIDATE --> LEADER : votes from majority
-    CANDIDATE --> FOLLOWER : higher term seen\nor split vote timeout
-    LEADER --> FOLLOWER : higher term seen\nfrom peer
+    FOLLOWER --> CANDIDATE: Election Timeout
+    CANDIDATE --> LEADER: Majority Votes
+    CANDIDATE --> FOLLOWER: Higher Term Seen
+    LEADER --> FOLLOWER: Higher Term Seen
 
-    LEADER --> LEADER : heartbeat every 50ms
-    FOLLOWER --> FOLLOWER : heartbeat received\n(timer reset)
+    note right of LEADER: Heartbeat (50ms)
+    note right of FOLLOWER: Reset Timer on Heartbeat
 ```
 
 - 👑 **LEADER** — amber border + crown badge in dashboard
