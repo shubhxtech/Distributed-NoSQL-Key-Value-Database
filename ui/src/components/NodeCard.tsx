@@ -51,6 +51,12 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
                    : node.cacheHitPercent > 20 ? 'var(--amber)'
                    : 'var(--text-3)';
 
+  // Raft role styling
+  const isLeader    = node.role === 'LEADER';
+  const isCandidate = node.role === 'CANDIDATE';
+  const roleColor   = isLeader ? '#f59e0b' : isCandidate ? '#a855f7' : 'var(--text-4)';
+  const roleBg      = isLeader ? '#fef3c7' : isCandidate ? 'rgba(168,85,247,0.12)' : 'transparent';
+
   return (
     <motion.div
       layout
@@ -59,12 +65,13 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
       transition={{ duration: 0.2 }}
       style={{
         background: 'var(--surface-0)',
-        border: `1px solid ${isUp ? 'var(--border)' : statusColor}`,
+        border: `1px solid ${isLeader ? '#f59e0b' : isUp ? 'var(--border)' : statusColor}`,
         borderRadius: 12,
         overflow: 'hidden',
         filter: isKilled ? 'grayscale(0.3)' : 'none',
         display: 'flex',
         flexDirection: 'column',
+        boxShadow: isLeader ? '0 0 0 1px rgba(245,158,11,0.3), 0 4px 12px rgba(245,158,11,0.08)' : 'none',
       }}
     >
       {/* ── Header ── */}
@@ -81,14 +88,20 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
           <div style={{ position: 'relative', flexShrink: 0 }}>
             <div style={{
               width: 34, height: 34, borderRadius: 8,
-              background: 'var(--surface-1)',
-              border: '1px solid var(--border)',
+              background: isLeader ? 'rgba(245,158,11,0.12)' : 'var(--surface-1)',
+              border: `1px solid ${isLeader ? 'rgba(245,158,11,0.4)' : 'var(--border)'}`,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: statusColor,
+              color: isLeader ? '#f59e0b' : statusColor,
             }}>
               <Server size={16} />
             </div>
-            {isUp && (
+            {isLeader && (
+              <span style={{
+                position: 'absolute', top: -6, right: -6,
+                fontSize: 12,
+              }}>👑</span>
+            )}
+            {!isLeader && isUp && (
               <span style={{
                 position: 'absolute', top: -2, right: -2,
                 width: 8, height: 8, borderRadius: '50%',
@@ -118,7 +131,13 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
             {statusLabel}
           </span>
           {node.role && (
-            <span style={{ fontSize: 9, color: 'var(--text-3)', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            <span style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+              color: roleColor,
+              background: roleBg,
+              padding: '1px 6px', borderRadius: 3,
+              border: isLeader ? '1px solid rgba(245,158,11,0.3)' : 'none',
+            }}>
               {node.role}
             </span>
           )}

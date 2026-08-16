@@ -2,7 +2,7 @@ package com.kvstore.coordinator.monitoring;
 
 import com.kvstore.coordinator.config.ClusterProperties;
 import com.kvstore.coordinator.config.NodeInfo;
-import com.kvstore.coordinator.routing.SimpleRouter;
+import com.kvstore.coordinator.routing.ConsistentHashRouter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -28,7 +28,7 @@ public class NodeStatePoller {
 
     private final ClusterProperties   clusterProperties;
     private final ClusterEventBus     eventBus;
-    private final SimpleRouter        router;
+    private final ConsistentHashRouter router;
     private final RestTemplate        http = new RestTemplate();
 
     /** Last known SSTable count per node — used to detect flushes. */
@@ -36,7 +36,7 @@ public class NodeStatePoller {
 
     public NodeStatePoller(ClusterProperties clusterProperties,
                            ClusterEventBus eventBus,
-                           SimpleRouter router) {
+                           ConsistentHashRouter router) {
         this.clusterProperties = clusterProperties;
         this.eventBus          = eventBus;
         this.router            = router;
@@ -55,6 +55,7 @@ public class NodeStatePoller {
                 long walBytes    = ((Number) state.getOrDefault("walSizeBytes", 0L)).longValue();
                 int  sstCount    = (Integer) state.getOrDefault("sstableCount", 0);
                 String role      = (String) state.getOrDefault("role", "FOLLOWER");
+                long raftTerm    = ((Number) state.getOrDefault("raftTerm", 0L)).longValue();
 
                 // Publish memtable state
                 eventBus.publish(ClusterEvent.memtable(node.id(), fill, walBytes, sstCount));
@@ -70,13 +71,13 @@ public class NodeStatePoller {
                 if (router.isBlacklisted(node.id())) {
                     // Don't override kill status with UP from polling
                 } else {
-                    eventBus.publish(ClusterEvent.nodeStatus(node.id(), "UP", role));
+                    eventBus.publish(ClusterEvent.nodeStatus(node.id(), "UP", role, raftTerm));
                 }
 
             } catch (Exception e) {
                 log.warn("Node '{}' unreachable at {}: {}", node.id(), node.httpBaseUrl(), e.getMessage());
                 if (!router.isBlacklisted(node.id())) {
-                    eventBus.publish(ClusterEvent.nodeStatus(node.id(), "DOWN", "UNKNOWN"));
+                    eventBus.publish(ClusterEvent.nodeStatus(node.id(), "DOWN", "UNKNOWN", 0L));
                 }
             }
         }

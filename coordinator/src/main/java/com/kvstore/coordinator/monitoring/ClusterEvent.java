@@ -33,9 +33,10 @@ public record ClusterEvent(
         return new ClusterEvent("OPERATION", nodeId, op, key, latencyMs, success, Map.of(), Instant.now().toEpochMilli());
     }
 
-    public static ClusterEvent nodeStatus(String nodeId, String status, String role) {
+    public static ClusterEvent nodeStatus(String nodeId, String status, String role, long raftTerm) {
         return new ClusterEvent("NODE_STATUS", nodeId, null, null, 0, true,
-                Map.of("status", status, "role", role != null ? role : "FOLLOWER"), Instant.now().toEpochMilli());
+                Map.of("status", status, "role", role != null ? role : "FOLLOWER", "raftTerm", raftTerm),
+                Instant.now().toEpochMilli());
     }
 
     public static ClusterEvent memtable(String nodeId, int fillPercent, long walSizeBytes, int sstableCount) {

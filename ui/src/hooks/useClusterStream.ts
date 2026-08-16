@@ -6,7 +6,8 @@ export interface NodeState {
   grpcPort: number;
   httpPort: number;
   status: 'UP' | 'DOWN' | 'KILLED';
-  role: string;
+  role: string;      // LEADER | FOLLOWER | CANDIDATE
+  raftTerm: number;
   blacklisted: boolean;
   memtableFillPercent: number;
   walSizeBytes: number;
@@ -43,7 +44,8 @@ export function useClusterStream(coordinatorUrl: string = 'http://localhost:8080
         nodeMap[n.id] = {
           ...n,
           status: n.blacklisted ? 'KILLED' : 'DOWN',
-          role: 'FOLLOWER',
+          role: 'FOLLOWER',      // SSE NODE_STATUS will update to real role
+          raftTerm: 0,
           memtableFillPercent: 0,
           walSizeBytes: 0,
           sstableCount: 0,
@@ -89,7 +91,8 @@ export function useClusterStream(coordinatorUrl: string = 'http://localhost:8080
         switch (eventData.type) {
           case 'NODE_STATUS':
             node.status = eventData.extra.status;
-            node.role = eventData.extra.role;
+            node.role = eventData.extra.role ?? node.role;
+            if (eventData.extra.raftTerm !== undefined) node.raftTerm = eventData.extra.raftTerm;
             if (node.status === 'KILLED') node.blacklisted = true;
             else if (node.status === 'UP') node.blacklisted = false;
             break;

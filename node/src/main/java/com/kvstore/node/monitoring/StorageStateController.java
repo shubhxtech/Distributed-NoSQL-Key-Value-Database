@@ -3,6 +3,7 @@ package com.kvstore.node.monitoring;
 import com.kvstore.engine.LsmStorageEngine;
 import com.kvstore.engine.StorageEngine;
 import com.kvstore.node.config.NodeProperties;
+import com.kvstore.raft.RaftNode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -12,8 +13,9 @@ import java.util.Map;
 /**
  * Exposes storage engine internals for the cluster dashboard and NodeStatePoller.
  *
- * <p>{@code GET /api/v1/storage/state} returns live metrics (memtable fill %, WAL size, SSTable count).
- * <p>{@code POST /api/v1/storage/compact} triggers a background compaction cycle on this node.
+ * <p>{@code GET /api/v1/storage/state} returns live metrics (memtable fill %, WAL size,
+ * SSTable count) plus the current Raft role and term.
+ * <p>{@code POST /api/v1/storage/compact} triggers a background compaction cycle.
  */
 @RestController
 @RequestMapping("/api/v1/storage")
@@ -22,10 +24,14 @@ public class StorageStateController {
 
     private final StorageEngine  storageEngine;
     private final NodeProperties nodeProperties;
+    private final RaftNode       raftNode;
 
-    public StorageStateController(StorageEngine storageEngine, NodeProperties nodeProperties) {
+    public StorageStateController(StorageEngine storageEngine,
+                                  NodeProperties nodeProperties,
+                                  RaftNode raftNode) {
         this.storageEngine  = storageEngine;
         this.nodeProperties = nodeProperties;
+        this.raftNode       = raftNode;
     }
 
     @GetMapping("/state")
@@ -33,7 +39,11 @@ public class StorageStateController {
         Map<String, Object> state = new LinkedHashMap<>();
         state.put("nodeId", nodeProperties.id());
         state.put("status", "UP");
-        state.put("role",   "FOLLOWER");   // Week 2: real role from Raft
+
+        // Real Raft role from the state machine — no longer hardcoded
+        state.put("role",     raftNode.role().name());
+        state.put("raftTerm", raftNode.term());
+        state.put("isLeader", raftNode.role().name().equals("LEADER"));
 
         if (storageEngine instanceof LsmStorageEngine lsm) {
             state.put("memtableFillPercent", lsm.memtableFillPercent());
@@ -66,7 +76,7 @@ public class StorageStateController {
     }
 
     /**
-     * Exposes the deep internal state of the LSM engine (Memtable contents, SSTable lists)
+     * Exposes the deep internal state of the LSM engine (Memtable contents, SSTable lists).
      * Used by the Storage Visualizer in the UI.
      */
     @GetMapping("/debug/dump")
@@ -74,6 +84,7 @@ public class StorageStateController {
         if (storageEngine instanceof LsmStorageEngine lsm) {
             Map<String, Object> dump = lsm.getStorageStateDump();
             dump.put("nodeId", nodeProperties.id());
+            dump.put("role",   raftNode.role().name());
             return ResponseEntity.ok(dump);
         }
         return ResponseEntity.status(501).body(Map.of(

@@ -53,7 +53,7 @@ public class MonitoringController {
         // Send initial node statuses so the dashboard has a starting state
         clusterProperties.nodes().forEach(node -> {
             String status = router.isBlacklisted(node.id()) ? "KILLED" : "UP";
-            eventBus.publish(ClusterEvent.nodeStatus(node.id(), status, "FOLLOWER"));
+            eventBus.publish(ClusterEvent.nodeStatus(node.id(), status, "FOLLOWER", 0L));
         });
         return emitter;
     }
@@ -96,7 +96,7 @@ public class MonitoringController {
     @PostMapping("/nodes/{nodeId}/kill")
     public ResponseEntity<Map<String, String>> killNode(@PathVariable String nodeId) {
         router.blacklist(nodeId);
-        eventBus.publish(ClusterEvent.nodeStatus(nodeId, "KILLED", "UNKNOWN"));
+        eventBus.publish(ClusterEvent.nodeStatus(nodeId, "KILLED", "UNKNOWN", 0L));
         return ResponseEntity.ok(Map.of("status", "KILLED", "nodeId", nodeId));
     }
 
@@ -106,7 +106,7 @@ public class MonitoringController {
     @PostMapping("/nodes/{nodeId}/restart")
     public ResponseEntity<Map<String, String>> restartNode(@PathVariable String nodeId) {
         router.unblacklist(nodeId);
-        eventBus.publish(ClusterEvent.nodeStatus(nodeId, "UP", "FOLLOWER"));
+        eventBus.publish(ClusterEvent.nodeStatus(nodeId, "UP", "FOLLOWER", 0L));
         return ResponseEntity.ok(Map.of("status", "UP", "nodeId", nodeId));
     }
 }
