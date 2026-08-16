@@ -4,7 +4,7 @@
 #   Stage 2: run with slim JRE (no build tools)
 
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jdk-alpine AS builder
+FROM eclipse-temurin:21-jdk AS builder
 
 WORKDIR /workspace
 

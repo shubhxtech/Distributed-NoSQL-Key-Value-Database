@@ -2,7 +2,7 @@
 # Multi-stage build for the KV coordinator (REST API + routing + replication).
 
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jdk-alpine AS builder
+FROM eclipse-temurin:21-jdk AS builder
 
 WORKDIR /workspace
 
