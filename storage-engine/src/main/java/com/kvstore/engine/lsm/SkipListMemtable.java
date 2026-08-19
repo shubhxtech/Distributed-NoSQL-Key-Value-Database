@@ -1,7 +1,7 @@
 package com.kvstore.engine.lsm;
 
 import com.kvstore.engine.ValueEntry;
-import org.slf4j.Logger;
+import org.slf4j.Logger;                             // simple logging facade for java
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
@@ -11,7 +11,6 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Day 5: An in-memory, thread-safe, sorted memtable backed by a {@link ConcurrentSkipListMap}.
  *
  * <h2>Why a skip list instead of a HashMap?</h2>
  * <p>SSTables store data <em>sorted by key</em>. When the memtable is flushed to an
