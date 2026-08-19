@@ -3,6 +3,8 @@ package com.kvstore.node.metrics;
 import com.kvstore.engine.LsmStorageEngine;
 import com.kvstore.engine.StorageEngine;
 import com.kvstore.node.config.NodeProperties;
+import com.kvstore.raft.RaftNode;
+import com.kvstore.raft.RaftRole;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
@@ -35,22 +37,41 @@ public class StorageMetrics {
 
     private final StorageEngine  storageEngine;
     private final NodeProperties nodeProperties;
+    private final RaftNode       raftNode;
     private final MeterRegistry  meterRegistry;
 
     public StorageMetrics(StorageEngine storageEngine,
                           NodeProperties nodeProperties,
+                          RaftNode raftNode,
                           MeterRegistry meterRegistry) {
         this.storageEngine  = storageEngine;
         this.nodeProperties = nodeProperties;
+        this.raftNode       = raftNode;
         this.meterRegistry  = meterRegistry;
     }
 
     @PostConstruct
     public void registerMetrics() {
+        String node = nodeProperties.id();
+
+        // ── Raft Consensus ───────────────────────────────────────────────────
+        Gauge.builder("kv.raft.term", raftNode, RaftNode::term)
+             .description("Current Raft term of the node")
+             .tag("node", node)
+             .register(meterRegistry);
+
+        Gauge.builder("kv.raft.commit.index", raftNode, RaftNode::commitIndex)
+             .description("Current Raft commit index of the node")
+             .tag("node", node)
+             .register(meterRegistry);
+
+        Gauge.builder("kv.raft.is.leader", raftNode, n -> n.role() == RaftRole.LEADER ? 1 : 0)
+             .description("1 if the node is currently the Raft leader, 0 otherwise")
+             .tag("node", node)
+             .register(meterRegistry);
+
         // Only bind LSM-specific metrics if the engine is an LsmStorageEngine
         if (!(storageEngine instanceof LsmStorageEngine lsm)) return;
-
-        String node = nodeProperties.id();
 
         // ── Memtable ──────────────────────────────────────────────────────────
         Gauge.builder("kv.memtable.fill.percent", lsm, LsmStorageEngine::memtableFillPercent)

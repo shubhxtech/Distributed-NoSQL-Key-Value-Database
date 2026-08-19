@@ -6,6 +6,9 @@ import com.kvstore.engine.StorageEngine;
 import com.kvstore.engine.ValueEntry;
 import com.kvstore.node.config.NodeProperties;
 import com.kvstore.proto.*;
+import com.kvstore.raft.RaftNode;
+import com.kvstore.raft.RaftRole;
+import com.kvstore.raft.RaftCommand;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.micrometer.core.instrument.Counter;
@@ -16,11 +19,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * gRPC implementation of {@code KvService}.
  *
- * <p>Bridges incoming gRPC calls to the {@link StorageEngine}.
+ * <p>Bridges incoming gRPC calls to the {@link StorageEngine} and {@link RaftNode} for consensus.
  * Registered as a gRPC service via {@code @GrpcService} (no additional config needed).
  *
  * <p>Metrics instrumented via Micrometer:
@@ -38,6 +43,7 @@ public class KvServiceGrpcImpl extends KvServiceGrpc.KvServiceImplBase {
 
     private final StorageEngine  storageEngine;
     private final NodeProperties nodeProperties;
+    private final RaftNode       raftNode;
 
     // ─── Metrics ─────────────────────────────────────────────────────────────
     private final Counter putsTotal;
@@ -50,9 +56,11 @@ public class KvServiceGrpcImpl extends KvServiceGrpc.KvServiceImplBase {
 
     public KvServiceGrpcImpl(StorageEngine storageEngine,
                              NodeProperties nodeProperties,
+                             RaftNode raftNode,
                              MeterRegistry meterRegistry) {
         this.storageEngine  = storageEngine;
         this.nodeProperties = nodeProperties;
+        this.raftNode       = raftNode;
 
         String nodeTag = nodeProperties.id();
         putsTotal    = Counter.builder("kv_puts_total")
@@ -75,25 +83,53 @@ public class KvServiceGrpcImpl extends KvServiceGrpc.KvServiceImplBase {
 
     @Override
     public void put(PutRequest request, StreamObserver<PutResponse> responseObserver) {
+        if (raftNode.role() != RaftRole.LEADER) {
+            String leaderId = raftNode.currentLeaderId();
+            responseObserver.onError(Status.UNAVAILABLE
+                    .withDescription("NOT_LEADER:" + (leaderId != null ? leaderId : ""))
+                    .asRuntimeException());
+            return;
+        }
+
         putTimer.record(() -> {
             try {
-                // Use the TTL-aware overload if the engine supports it
-                long ttlMs = request.getTtlMs();
-                if (storageEngine instanceof LsmStorageEngine lsm && ttlMs > 0) {
-                    lsm.put(request.getKey(), request.getValue().toByteArray(), ttlMs);
-                } else {
-                    storageEngine.put(request.getKey(), request.getValue().toByteArray());
+                // Build the command
+                RaftCommand command = RaftCommand.put(
+                        request.getKey(), 
+                        request.getValue().toByteArray(), 
+                        request.getTtlMs()
+                );
+                byte[] commandBytes = command.toBytes();
+                String commandId = UUID.randomUUID().toString();
+
+                long index = raftNode.appendCommand(commandBytes, commandId);
+                if (index == -1) {
+                    String leaderId = raftNode.currentLeaderId();
+                    responseObserver.onError(Status.UNAVAILABLE
+                            .withDescription("NOT_LEADER:" + (leaderId != null ? leaderId : ""))
+                            .asRuntimeException());
+                    return;
                 }
-                putsTotal.increment();
-                responseObserver.onNext(PutResponse.newBuilder()
-                        .setSuccess(true)
-                        .setMessage("OK")
-                        .build());
-                responseObserver.onCompleted();
-            } catch (IllegalArgumentException e) {
-                responseObserver.onError(Status.INVALID_ARGUMENT
-                        .withDescription(e.getMessage())
-                        .asRuntimeException());
+
+                // Wait for consensus commit
+                raftNode.getCommitFuture(index)
+                        .orTimeout(5, TimeUnit.SECONDS)
+                        .thenAccept(v -> {
+                            putsTotal.increment();
+                            responseObserver.onNext(PutResponse.newBuilder()
+                                    .setSuccess(true)
+                                    .setMessage("OK")
+                                    .build());
+                            responseObserver.onCompleted();
+                        })
+                        .exceptionally(ex -> {
+                            log.error("Consensus commit failed for index={}: {}", index, ex.getMessage());
+                            responseObserver.onError(Status.INTERNAL
+                                    .withDescription("Consensus write timeout or lost leadership")
+                                    .asRuntimeException());
+                            return null;
+                        });
+
             } catch (Exception e) {
                 log.error("PUT failed for key='{}': {}", request.getKey(), e.getMessage(), e);
                 responseObserver.onError(Status.INTERNAL
@@ -143,19 +179,48 @@ public class KvServiceGrpcImpl extends KvServiceGrpc.KvServiceImplBase {
 
     @Override
     public void delete(DeleteRequest request, StreamObserver<DeleteResponse> responseObserver) {
+        if (raftNode.role() != RaftRole.LEADER) {
+            String leaderId = raftNode.currentLeaderId();
+            responseObserver.onError(Status.UNAVAILABLE
+                    .withDescription("NOT_LEADER:" + (leaderId != null ? leaderId : ""))
+                    .asRuntimeException());
+            return;
+        }
+
         deleteTimer.record(() -> {
             try {
-                storageEngine.delete(request.getKey());
-                deletesTotal.increment();
-                responseObserver.onNext(DeleteResponse.newBuilder()
-                        .setSuccess(true)
-                        .setMessage("OK")
-                        .build());
-                responseObserver.onCompleted();
-            } catch (IllegalArgumentException e) {
-                responseObserver.onError(Status.INVALID_ARGUMENT
-                        .withDescription(e.getMessage())
-                        .asRuntimeException());
+                RaftCommand command = RaftCommand.delete(request.getKey());
+                byte[] commandBytes = command.toBytes();
+                String commandId = UUID.randomUUID().toString();
+
+                long index = raftNode.appendCommand(commandBytes, commandId);
+                if (index == -1) {
+                    String leaderId = raftNode.currentLeaderId();
+                    responseObserver.onError(Status.UNAVAILABLE
+                            .withDescription("NOT_LEADER:" + (leaderId != null ? leaderId : ""))
+                            .asRuntimeException());
+                    return;
+                }
+
+                // Wait for consensus commit
+                raftNode.getCommitFuture(index)
+                        .orTimeout(5, TimeUnit.SECONDS)
+                        .thenAccept(v -> {
+                            deletesTotal.increment();
+                            responseObserver.onNext(DeleteResponse.newBuilder()
+                                    .setSuccess(true)
+                                    .setMessage("OK")
+                                    .build());
+                            responseObserver.onCompleted();
+                        })
+                        .exceptionally(ex -> {
+                            log.error("Consensus commit failed for index={}: {}", index, ex.getMessage());
+                            responseObserver.onError(Status.INTERNAL
+                                    .withDescription("Consensus delete timeout or lost leadership")
+                                    .asRuntimeException());
+                            return null;
+                        });
+
             } catch (Exception e) {
                 log.error("DELETE failed for key='{}': {}", request.getKey(), e.getMessage(), e);
                 responseObserver.onError(Status.INTERNAL

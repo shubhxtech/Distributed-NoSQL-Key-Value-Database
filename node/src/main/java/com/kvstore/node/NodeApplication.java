@@ -120,17 +120,31 @@ public class NodeApplication {
         );
     }
 
+    @Bean
+    public io.grpc.Server raftGrpcServer(NodeProperties props, RaftNode raftNode) {
+        log.info("Creating Raft gRPC server on port {}", props.raftPort());
+        return io.grpc.ServerBuilder.forPort(props.raftPort())
+                .addService(new RaftServiceGrpcImpl(raftNode))
+                .build();
+    }
+
     /**
      * Lifecycle bean that starts/stops the {@link RaftNode} alongside Spring context.
      * Using {@link SmartLifecycle} ensures Raft starts after gRPC server is ready.
      */
     @Bean
-    public SmartLifecycle raftLifecycle(RaftNode raftNode, GrpcRaftTransport transport) {
+    public SmartLifecycle raftLifecycle(RaftNode raftNode, GrpcRaftTransport transport, io.grpc.Server raftGrpcServer) {
         return new SmartLifecycle() {
             private volatile boolean running = false;
 
             @Override
             public void start() {
+                try {
+                    raftGrpcServer.start();
+                    log.info("Raft gRPC server started on port {}", raftGrpcServer.getPort());
+                } catch (java.io.IOException e) {
+                    throw new IllegalStateException("Failed to start Raft gRPC server", e);
+                }
                 raftNode.start();
                 running = true;
                 log.info("RaftNode started — participating in leader election.");
@@ -139,6 +153,7 @@ public class NodeApplication {
             @Override
             public void stop() {
                 raftNode.stop();
+                raftGrpcServer.shutdown();
                 transport.shutdown();
                 running = false;
                 log.info("RaftNode stopped.");

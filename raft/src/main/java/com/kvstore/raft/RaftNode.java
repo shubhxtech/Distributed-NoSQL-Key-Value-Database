@@ -75,6 +75,8 @@ public class RaftNode {
     // ─── Election vote tracking ───────────────────────────────────────────────
     private final Set<String> votesReceived = ConcurrentHashMap.newKeySet();
 
+    private final Map<Long, CompletableFuture<Void>> commitListeners = new ConcurrentHashMap<>();
+
     public RaftNode(String nodeId,
                     List<String> peerIds,
                     RaftTransport transport,
@@ -252,6 +254,10 @@ public class RaftNode {
         role.set(RaftRole.FOLLOWER);
         cancelHeartbeat();
         resetElectionTimer();
+        commitListeners.forEach((idx, future) ->
+            future.completeExceptionally(new IllegalStateException("Lost leadership before entry was committed"))
+        );
+        commitListeners.clear();
         log.info("[{}] → FOLLOWER (term={}, leader={})", nodeId, term, leaderId);
     }
 
@@ -397,7 +403,24 @@ public class RaftNode {
                     log.error("[{}] State machine error applying index={}: {}", nodeId, lastApplied, e.getMessage());
                 }
             }
+            CompletableFuture<Void> future = commitListeners.remove(lastApplied);
+            if (future != null) {
+                future.complete(null);
+            }
         }
+    }
+
+    /**
+     * Returns a CompletableFuture that completes when the given log index is committed
+     * and applied to the state machine.
+     */
+    public CompletableFuture<Void> getCommitFuture(long index) {
+        if (lastApplied >= index) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        commitListeners.put(index, future);
+        return future;
     }
 
     // ─── Timer management ─────────────────────────────────────────────────────

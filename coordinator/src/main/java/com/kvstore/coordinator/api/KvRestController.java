@@ -11,7 +11,7 @@ import com.kvstore.coordinator.replication.ReplicationService;
 import com.kvstore.coordinator.routing.ConsistentHashRouter;
 import com.kvstore.proto.*;
 import io.grpc.StatusRuntimeException;
-import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Counter; // library for spring boot for counter, metrics collector allow to monitor health, traffic volumes and errors rates.
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,7 +41,14 @@ import java.util.Map;
  * <p>Every PUT and DELETE also fans out to all other live nodes via
  * {@link ReplicationService} (full replication, RF = N) so that GET can be
  * served from any node without a cache miss.
+ * 
+ * RestController : Tells spring boot that this class defines rest endpoints so it automatically serializes return values like 
+ * maps, objects into json objects
+ * 
+ * Request mapping: sets the base url path every method inside it will start with this path(/api/v1/kv)
  */
+
+
 @RestController
 @RequestMapping("/api/v1/kv")
 @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173"})
@@ -59,6 +66,8 @@ public class KvRestController {
     private final Counter coordinatorDeletes;
     private final Counter coordinatorErrors;
 
+    private volatile String lastKnownLeaderId = null;
+
     public KvRestController(ConsistentHashRouter router,
                             NodeGrpcClient nodeClient,
                             ClusterEventBus eventBus,
@@ -69,6 +78,8 @@ public class KvRestController {
         this.eventBus           = eventBus;
         this.replicationService = replicationService;
 
+        // for application monitoring and Observabilty. Tracks how many times API calls are made and how many errors occur
+        // exported to promethus 
         coordinatorPuts    = Counter.builder("coordinator_puts_total").register(meterRegistry);
         coordinatorGets    = Counter.builder("coordinator_gets_total").register(meterRegistry);
         coordinatorDeletes = Counter.builder("coordinator_deletes_total").register(meterRegistry);
@@ -85,45 +96,42 @@ public class KvRestController {
      */
     @PutMapping("/{key}")
     public ResponseEntity<Map<String, Object>> put(
-            @PathVariable String key,
-            @RequestBody  PutValueRequest body
+            @PathVariable String key,                                       // extract key from the url 
+            @RequestBody  PutValueRequest body                              // extract value and ttl from request body
     ) {
         log.info("REST PUT key='{}'", key);
         coordinatorPuts.increment();
         long start = System.currentTimeMillis();
 
-        // 1. Route to the primary owner via consistent hash.
-        NodeInfo primary = router.route(key);
         PutRequest grpcRequest = PutRequest.newBuilder()
                 .setKey(key)
                 .setValue(ByteString.copyFrom(body.value(), StandardCharsets.UTF_8))
                 .setTtlMs(body.ttlMs())
                 .build();
         try {
-            PutResponse response = nodeClient.put(primary.id(), grpcRequest);
+            PutResponse response = executePutWithRetry(key, grpcRequest);
 
             double latency = System.currentTimeMillis() - start;
-            eventBus.publish(ClusterEvent.operation(primary.id(), "PUT", key, latency, true));
+            eventBus.publish(ClusterEvent.operation(lastKnownLeaderId, "PUT", key, latency, true));
 
-            // 2. Fan-out to all other live nodes asynchronously (RF = N).
-            List<NodeInfo> followers = router.liveNodes().stream()
-                    .filter(n -> !n.id().equals(primary.id()))
+            List<String> followers = router.liveNodes().stream()
+                    .map(NodeInfo::id)
+                    .filter(id -> !id.equals(lastKnownLeaderId))
                     .toList();
-            replicationService.replicatePut(followers, grpcRequest);
 
             return ResponseEntity.ok(Map.of(
                     "success",  response.getSuccess(),
-                    "version",  response.getVersion(),
-                    "routedTo", primary.id(),
-                    "replicas", followers.stream().map(NodeInfo::id).toList()
+                    "routedTo", lastKnownLeaderId,
+                    "replicas", followers
             ));
-        } catch (StatusRuntimeException e) {
+        } catch (Exception e) {
             coordinatorErrors.increment();
-            eventBus.publish(ClusterEvent.operation(primary.id(), "PUT", key, System.currentTimeMillis() - start, false));
-            log.error("gRPC PUT failed for key='{}' on node='{}': {}", key, primary.id(), e.getStatus());
+            String failedNode = lastKnownLeaderId != null ? lastKnownLeaderId : router.route(key).id();
+            eventBus.publish(ClusterEvent.operation(failedNode, "PUT", key, System.currentTimeMillis() - start, false));
+            log.error("gRPC PUT failed for key='{}': {}", key, e.getMessage());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                    .body(Map.of("error", "Node error: " + e.getStatus().getDescription(),
-                                 "routedTo", primary.id()));
+                    .body(Map.of("error", "Write consensus failed: " + e.getMessage(),
+                                 "routedTo", failedNode));
         }
     }
 
@@ -183,31 +191,30 @@ public class KvRestController {
         coordinatorDeletes.increment();
         long start = System.currentTimeMillis();
 
-        NodeInfo primary = router.route(key);
         DeleteRequest grpcRequest = DeleteRequest.newBuilder().setKey(key).build();
         try {
-            DeleteResponse response = nodeClient.delete(primary.id(), grpcRequest);
+            DeleteResponse response = executeDeleteWithRetry(key, grpcRequest);
 
-            eventBus.publish(ClusterEvent.operation(primary.id(), "DELETE", key, System.currentTimeMillis() - start, true));
+            eventBus.publish(ClusterEvent.operation(lastKnownLeaderId, "DELETE", key, System.currentTimeMillis() - start, true));
 
-            // Fan-out tombstone to all other live nodes so no node keeps stale data.
-            List<NodeInfo> followers = router.liveNodes().stream()
-                    .filter(n -> !n.id().equals(primary.id()))
+            List<String> followers = router.liveNodes().stream()
+                    .map(NodeInfo::id)
+                    .filter(id -> !id.equals(lastKnownLeaderId))
                     .toList();
-            replicationService.replicateDelete(followers, grpcRequest);
 
             return ResponseEntity.ok(Map.of(
                     "success",  response.getSuccess(),
-                    "routedTo", primary.id(),
-                    "replicas", followers.stream().map(NodeInfo::id).toList()
+                    "routedTo", lastKnownLeaderId,
+                    "replicas", followers
             ));
-        } catch (StatusRuntimeException e) {
+        } catch (Exception e) {
             coordinatorErrors.increment();
-            eventBus.publish(ClusterEvent.operation(primary.id(), "DELETE", key, System.currentTimeMillis() - start, false));
-            log.error("gRPC DELETE failed for key='{}' on node='{}': {}", key, primary.id(), e.getStatus());
+            String failedNode = lastKnownLeaderId != null ? lastKnownLeaderId : router.route(key).id();
+            eventBus.publish(ClusterEvent.operation(failedNode, "DELETE", key, System.currentTimeMillis() - start, false));
+            log.error("gRPC DELETE failed for key='{}': {}", key, e.getMessage());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                    .body(Map.of("error", "Node error: " + e.getStatus().getDescription(),
-                                 "routedTo", primary.id()));
+                    .body(Map.of("error", "Delete consensus failed: " + e.getMessage(),
+                                 "routedTo", failedNode));
         }
     }
 
@@ -223,5 +230,73 @@ public class KvRestController {
         // Coordinator pings all nodes and collects results
         // (Week 3: will also verify ring membership)
         return ResponseEntity.ok(Map.of("status", "coordinator-ok"));
+    }
+
+    // ─── Private Helpers for Leader Write Routing ─────────────────────────────
+
+    private PutResponse executePutWithRetry(String key, PutRequest grpcRequest) {
+        int maxRetries = 3;
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            String target = lastKnownLeaderId;
+            if (target == null || !nodeClient.hasNode(target)) {
+                target = router.route(key).id();
+            }
+            try {
+                PutResponse res = nodeClient.put(target, grpcRequest);
+                lastKnownLeaderId = target; // target succeeded and is leader
+                return res;
+            } catch (StatusRuntimeException e) {
+                if (e.getStatus().getCode() == io.grpc.Status.Code.UNAVAILABLE &&
+                    e.getStatus().getDescription() != null &&
+                    e.getStatus().getDescription().startsWith("NOT_LEADER:")) {
+                    String leaderId = e.getStatus().getDescription().substring("NOT_LEADER:".length()).trim();
+                    if (!leaderId.isEmpty()) {
+                        log.info("Node '{}' returned NOT_LEADER. Updating leader to '{}' and retrying (attempt {}/{})...",
+                                 target, leaderId, attempt + 1, maxRetries);
+                        lastKnownLeaderId = leaderId;
+                    } else {
+                        log.info("Node '{}' returned NOT_LEADER with empty leader. Retrying routing (attempt {}/{})...",
+                                 target, attempt + 1, maxRetries);
+                        lastKnownLeaderId = null; // force recalculation via router
+                    }
+                } else {
+                    throw e; // propagate other errors (like actual network timeout, etc.)
+                }
+            }
+        }
+        throw new IllegalStateException("Max retries exceeded looking for Raft leader");
+    }
+
+    private DeleteResponse executeDeleteWithRetry(String key, DeleteRequest grpcRequest) {
+        int maxRetries = 3;
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            String target = lastKnownLeaderId;
+            if (target == null || !nodeClient.hasNode(target)) {
+                target = router.route(key).id();
+            }
+            try {
+                DeleteResponse res = nodeClient.delete(target, grpcRequest);
+                lastKnownLeaderId = target;
+                return res;
+            } catch (StatusRuntimeException e) {
+                if (e.getStatus().getCode() == io.grpc.Status.Code.UNAVAILABLE &&
+                    e.getStatus().getDescription() != null &&
+                    e.getStatus().getDescription().startsWith("NOT_LEADER:")) {
+                    String leaderId = e.getStatus().getDescription().substring("NOT_LEADER:".length()).trim();
+                    if (!leaderId.isEmpty()) {
+                        log.info("Node '{}' returned NOT_LEADER. Updating leader to '{}' and retrying (attempt {}/{})...",
+                                 target, leaderId, attempt + 1, maxRetries);
+                        lastKnownLeaderId = leaderId;
+                    } else {
+                        log.info("Node '{}' returned NOT_LEADER with empty leader. Retrying routing (attempt {}/{})...",
+                                 target, attempt + 1, maxRetries);
+                        lastKnownLeaderId = null;
+                    }
+                } else {
+                    throw e;
+                }
+            }
+        }
+        throw new IllegalStateException("Max retries exceeded looking for Raft leader");
     }
 }
