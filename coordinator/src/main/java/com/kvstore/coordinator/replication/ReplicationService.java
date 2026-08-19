@@ -33,7 +33,10 @@ import java.util.concurrent.Executors;
  * <p>Replication failures are logged as WARN but do not propagate to the client.
  * The primary write already succeeded. A future Raft-based approach will enforce
  * quorum durability.
+ *
+ * @deprecated Kept for reference. Replication is now fully handled via Raft log replication.
  */
+@Deprecated
 @Service
 public class ReplicationService {
 

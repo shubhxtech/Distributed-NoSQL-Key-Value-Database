@@ -38,9 +38,9 @@ import java.util.Map;
  * (MD5 consistent hashing with 150 virtual nodes per physical node) and actual
  * gRPC calls to {@link NodeGrpcClient}.
  *
- * <p>Every PUT and DELETE also fans out to all other live nodes via
- * {@link ReplicationService} (full replication, RF = N) so that GET can be
- * served from any node without a cache miss.
+ * <p>Every PUT and DELETE is routed to the active Raft leader node. The leader
+ * appends the operation to the consensus log and replicates it to followers.
+ * Once a majority quorum commits the write, the state is applied to local storage.
  * 
  * RestController : Tells spring boot that this class defines rest endpoints so it automatically serializes return values like 
  * maps, objects into json objects
