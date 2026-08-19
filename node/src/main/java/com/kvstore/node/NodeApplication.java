@@ -91,6 +91,7 @@ public class NodeApplication {
                 props.id(),
                 peerIds,
                 transport,
+                Path.of(props.dataDir()),
                 // ── State machine applier: Raft commit → LSM write ──
                 entry -> {
                     if (entry.command().length == 0) return;  // noop sentinel

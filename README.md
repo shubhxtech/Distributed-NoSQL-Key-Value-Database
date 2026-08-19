@@ -202,7 +202,7 @@ The coordinator routes every key to the correct storage node using a **consisten
 
 ### Replication
 
-`ReplicationService` writes to the primary node via gRPC and fans out replicas to additional nodes. Quorum-based writes are in progress (Raft log replication replaces this).
+Replication is fully managed via Raft consensus log replication. Writes are routed directly to the current leader, appended to the consensus log, and replicated to a majority of nodes before returning success to the coordinator.
 
 ---
 
@@ -222,7 +222,7 @@ Each storage node runs a `RaftNode` — a complete implementation of the Raft co
 | Raft → LSM bridge (committed entries applied to storage) | ✅ |
 | gRPC transport (`GrpcRaftTransport`) | ✅ |
 | Spring Boot lifecycle integration (`SmartLifecycle`) | ✅ |
-| Persistent state (term + votedFor flushed to disk) | 🔄 In progress |
+| Persistent state (term + votedFor flushed to disk) | ✅ |
 
 ### Raft Write Flow
 

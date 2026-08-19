@@ -3,6 +3,10 @@ package com.kvstore.raft;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -43,6 +47,7 @@ public class RaftNode {
     // ─── Identifiers ──────────────────────────────────────────────────────────
     private final String       nodeId;
     private final List<String> peerIds;          // IDs of all OTHER nodes in the cluster
+    private final Path         stateFilePath;
 
     // ─── Persistent state (would be fsync'd to disk in production) ───────────
     private final AtomicLong          currentTerm = new AtomicLong(0);
@@ -81,15 +86,25 @@ public class RaftNode {
                     List<String> peerIds,
                     RaftTransport transport,
                     Consumer<RaftLogEntry> stateMachineApplier) {
+        this(nodeId, peerIds, transport, null, stateMachineApplier);
+    }
+
+    public RaftNode(String nodeId,
+                    List<String> peerIds,
+                    RaftTransport transport,
+                    Path dataDir,
+                    Consumer<RaftLogEntry> stateMachineApplier) {
         this.nodeId              = nodeId;
         this.peerIds             = List.copyOf(peerIds);
         this.transport           = transport;
+        this.stateFilePath       = dataDir != null ? dataDir.resolve("raft.state") : null;
         this.stateMachineApplier = stateMachineApplier;
         this.scheduler           = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "raft-" + nodeId);
             t.setDaemon(true);
             return t;
         });
+        loadState();
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -163,6 +178,7 @@ public class RaftNode {
 
         // Grant vote
         votedFor = candidateId;
+        saveState();
         resetElectionTimer();
         log.info("[{}] Granted vote to {} for term {}", nodeId, candidateId, myTerm);
         return new long[]{ myTerm, 1 };
@@ -250,6 +266,7 @@ public class RaftNode {
     private synchronized void becomeFollower(long term, String leaderId) {
         currentTerm.set(term);
         votedFor   = null;
+        saveState();
         currentLeaderId = leaderId;
         role.set(RaftRole.FOLLOWER);
         cancelHeartbeat();
@@ -264,6 +281,7 @@ public class RaftNode {
     private synchronized void becomeCandidate() {
         long newTerm = currentTerm.incrementAndGet();
         votedFor     = nodeId;   // vote for self
+        saveState();
         role.set(RaftRole.CANDIDATE);
         votesReceived.clear();
         votesReceived.add(nodeId);
@@ -446,6 +464,36 @@ public class RaftNode {
     private void cancelHeartbeat() {
         if (heartbeatFuture != null && !heartbeatFuture.isDone()) {
             heartbeatFuture.cancel(false);
+        }
+    }
+
+    private synchronized void saveState() {
+        if (stateFilePath == null) return;
+        try {
+            Files.writeString(
+                stateFilePath, 
+                currentTerm.get() + "," + (votedFor != null ? votedFor : ""),
+                StandardCharsets.UTF_8
+            );
+        } catch (IOException e) {
+            log.error("[{}] Failed to save Raft state to disk: {}", nodeId, e.getMessage());
+        }
+    }
+
+    private synchronized void loadState() {
+        if (stateFilePath == null || !Files.exists(stateFilePath)) return;
+        try {
+            String content = Files.readString(stateFilePath, StandardCharsets.UTF_8).trim();
+            String[] parts = content.split(",", 2);
+            if (parts.length >= 1) {
+                currentTerm.set(Long.parseLong(parts[0]));
+            }
+            if (parts.length >= 2 && !parts[1].isEmpty()) {
+                votedFor = parts[1];
+            }
+            log.info("[{}] Loaded persistent Raft state: term={}, votedFor={}", nodeId, currentTerm.get(), votedFor);
+        } catch (Exception e) {
+            log.error("[{}] Failed to load Raft state from disk: {}", nodeId, e.getMessage());
         }
     }
 }
