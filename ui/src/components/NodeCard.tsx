@@ -32,7 +32,7 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
   // Semantic status
   const statusColor = isUp ? 'var(--green)' : isKilled ? 'var(--red)' : 'var(--amber)';
   const statusBg    = isUp ? 'var(--green-bg)' : isKilled ? 'var(--red-bg)' : 'var(--amber-bg)';
-  const statusLabel = isKilled ? 'Partitioned' : isUp ? 'Healthy' : 'Down';
+  const statusLabel = isKilled ? 'Isolated' : isUp ? 'Healthy' : 'Down';
 
   // Memtable
   const fillPct = node.memtableFillPercent;
@@ -323,7 +323,7 @@ export const NodeCard: React.FC<NodeCardProps> = ({ node, onKill, onRestart, onC
             onMouseEnter={e => (e.currentTarget.style.opacity = '0.8')}
             onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
           >
-            Heal Partition
+            Reconnect
           </button>
         )}
 

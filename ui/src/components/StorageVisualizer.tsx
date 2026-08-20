@@ -29,7 +29,7 @@ export const StorageVisualizer: React.FC<StorageVisualizerProps> = ({ nodes }) =
 
     const fetchDump = async () => {
       try {
-        const res = await fetch(`http://${node.host}:${node.httpPort}/api/v1/storage/debug/dump`);
+        const res = await fetch(`http://localhost:${node.httpPort}/api/v1/storage/debug/dump`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         setDump(data);
