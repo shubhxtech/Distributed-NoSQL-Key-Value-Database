@@ -7,14 +7,6 @@ interface RingSlot {
   nodeId: string;
 }
 
-interface NodeArc {
-  nodeId: string;
-  color: string;
-  startAngle: number;
-  endAngle: number;
-  slots: number;
-}
-
 // Deterministic color per node — matches NodeCard palette
 const NODE_COLORS: Record<string, { stroke: string; fill: string; glow: string }> = {
   'node-1': { stroke: '#6366f1', fill: 'rgba(99,102,241,0.15)', glow: 'rgba(99,102,241,0.5)' },
@@ -64,26 +56,6 @@ export const HashRing = () => {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, []);
 
-  // ── Compute arcs per physical node ────────────────────────────────────────
-  const nodeArcs: NodeArc[] = (() => {
-    if (ring.length === 0) return [];
-    const nodeSlots: Record<string, number[]> = {};
-    ring.forEach(slot => {
-      if (!nodeSlots[slot.nodeId]) nodeSlots[slot.nodeId] = [];
-      nodeSlots[slot.nodeId].push(posToAngle(slot.position));
-    });
-
-    return Object.entries(nodeSlots).map(([nodeId, angles]) => {
-      const sorted = [...angles].sort((a, b) => a - b);
-      return {
-        nodeId,
-        color: nodeColor(nodeId).stroke,
-        startAngle: sorted[0],
-        endAngle: sorted[sorted.length - 1],
-        slots: angles.length,
-      };
-    });
-  })();
 
   const uniqueNodes = Array.from(new Set(ring.map(r => r.nodeId))).sort();
 
@@ -95,15 +67,6 @@ export const HashRing = () => {
   const TICK_R = 126;  // outer tick radius
   const LABEL_R = 140; // label radius
 
-  // Convert ring position angle → SVG arc path
-  const arcPath = (startAngle: number, endAngle: number, radius: number) => {
-    const x1 = cx + radius * Math.cos(startAngle - Math.PI / 2);
-    const y1 = cy + radius * Math.sin(startAngle - Math.PI / 2);
-    const x2 = cx + radius * Math.cos(endAngle - Math.PI / 2);
-    const y2 = cy + radius * Math.sin(endAngle - Math.PI / 2);
-    const large = endAngle - startAngle > Math.PI ? 1 : 0;
-    return `M ${x1} ${y1} A ${radius} ${radius} 0 ${large} 1 ${x2} ${y2}`;
-  };
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   const totalSlots = ring.length;
@@ -199,12 +162,7 @@ export const HashRing = () => {
                   .map(r => posToAngle(r.position));
                 if (angles.length === 0) return null;
 
-                // Compute circular mean
-                const sinSum = angles.reduce((s, a) => s + Math.sin(a), 0);
-                const cosSum = angles.reduce((s, a) => s + Math.cos(a), 0);
-                const meanAngle = Math.atan2(sinSum, angles.length) / angles.length
-                  + Math.atan2(cosSum, angles.length) / angles.length;
-                // Simpler: just use first angle + offset for label
+                // Use median angle position for label placement
                 const labelAngle = angles[Math.floor(angles.length / 2)] - Math.PI / 2;
                 const lx = cx + LABEL_R * Math.cos(labelAngle);
                 const ly = cy + LABEL_R * Math.sin(labelAngle);
