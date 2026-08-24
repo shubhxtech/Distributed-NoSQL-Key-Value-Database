@@ -5,9 +5,10 @@
 [![gRPC](https://img.shields.io/badge/gRPC-1.65-blue?logo=grpc)](https://grpc.io)
 [![Raft](https://img.shields.io/badge/Consensus-Raft-orange)](https://raft.github.io)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://docs.docker.com/compose/)
+[![React](https://img.shields.io/badge/Dashboard-React%2FVite-61DAFB?logo=react)](https://vitejs.dev)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-> A distributed key-value store built entirely from scratch in Java — modeled after the internals of **Redis**, **Cassandra**, **RocksDB**, and **DynamoDB**. Every subsystem is hand-rolled: the storage engine, the consistent-hash router, the Raft consensus state machine, and the observability pipeline.
+> A distributed key-value store built entirely from scratch in Java — modeled after the internals of **RocksDB**, **Cassandra**, **DynamoDB**, and **etcd**. Every subsystem is hand-rolled: the LSM-tree storage engine, consistent-hash router, Raft consensus state machine, observability pipeline, and a real-time React dashboard.
 
 ---
 
@@ -19,7 +20,7 @@
 - [Storage Engine (LSM-Tree)](#storage-engine-lsm-tree)
 - [Cluster & Routing](#cluster--routing)
 - [Raft Consensus](#raft-consensus)
-- [Observability Dashboard](#observability-dashboard)
+- [Observability](#observability)
 - [Quick Start](#quick-start)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
@@ -30,55 +31,50 @@
 
 ## Overview
 
-This project is a ground-up implementation of a distributed, sharded key-value database. The goal is to understand how production databases work at the systems level — not by using them, but by building each piece from first principles.
+This project is a ground-up implementation of a distributed, replicated key-value database. The goal is to understand how production databases work at the systems level — not by using them, but by building each piece from first principles.
 
 **What is implemented:**
 
-| Layer | What | Inspired by |
+| Layer | Technology | Inspired by |
 |---|---|---|
-| **Storage** | LSM-Tree with WAL, Memtable, SSTables, Compaction | RocksDB, Cassandra, LevelDB |
-| **Read optimizations** | Bloom Filter (MurmurHash) + LRU Cache | RocksDB, BigTable |
+| **Storage** | LSM-Tree with WAL, SkipList Memtable, SSTables, Size-tiered Compaction | RocksDB, Cassandra, LevelDB |
+| **Read optimizations** | Bloom Filter (MurmurHash3) + Sparse Index + LRU Cache | RocksDB, BigTable |
+| **Durability** | WAL with CRC32 checksums + crash-safe replay | PostgreSQL WAL, LevelDB |
 | **Routing** | Consistent Hashing (MD5, 150 VNodes/node) | DynamoDB, Cassandra |
-| **Transport** | gRPC + Protocol Buffers | Cassandra internal wire protocol |
-| **Consensus** | Custom Raft state machine (leader election + log replication) | Etcd, CockroachDB |
-| **Observability** | Prometheus metrics + Grafana + SSE dashboard | Datadog, CloudWatch |
-| **Frontend** | React/Vite live dashboard with hash ring visualizer | — |
+| **Transport** | gRPC + Protocol Buffers on dual ports | Cassandra internal wire protocol |
+| **Consensus** | Custom Raft (leader election + quorum writes + persistent metadata) | etcd, CockroachDB |
+| **Observability** | Prometheus + Grafana + SSE event stream | Datadog, CloudWatch |
+| **Frontend** | React/Vite real-time cluster dashboard with hash ring visualizer | — |
+
+**Consistency Guarantee:** CP (strongly consistent). All writes go through the Raft leader and require a majority quorum (>=2/3 nodes) to commit. The system refuses writes during quorum loss.
 
 ---
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    classDef client fill:#fff,stroke:#333,stroke-width:2px,color:#000
-    classDef coord fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000,stroke-dasharray: 5 5
-    classDef node fill:#fff,stroke:#333,stroke-width:2px,color:#000
-    classDef comp fill:#fafafa,stroke:#999,stroke-width:1px,color:#333
-    classDef obs fill:#eee,stroke:#999,stroke-width:1px,color:#000
-
-    Client(["REST Client / Java SDK / UI"]):::client
-    UI(["React Dashboard :5173"]):::obs
-    
-    subgraph Cluster["KV Cluster"]
-        Coordinator["Coordinator\nConsistent Hash Router"]:::coord
-        Node1["Node-1\ngRPC:9091\nRaft:9181"]:::node
-        Node2["Node-2\ngRPC:9092\nRaft:9182"]:::node
-        Node3["Node-3\ngRPC:9093\nRaft:9183"]:::node
-    end
-    
-    subgraph Observability["Observability"]
-        Prometheus["Prometheus"]:::obs
-        Grafana["Grafana"]:::obs
-    end
-
-    Client -->|HTTP :8080| Coordinator
-    Coordinator -.->|SSE| UI
-    Coordinator -->|gRPC| Node1 & Node2 & Node3
-    Node1 <-.->|Raft| Node2 & Node3
-    Node2 <-.->|Raft| Node3
-    
-    Cluster -.->|Scrape :actuator| Prometheus
-    Prometheus --> Grafana
+```
+REST Client / UI
+       |
+       v  HTTP :8080
+  +----------------------------------+
+  |  Coordinator                     |
+  |  (Consistent Hash Router)        |
+  +------+---------------------------+
+         | gRPC (routes writes to Raft leader)
+  +------v------+--------+-----------+
+  |  Node-1     |  Node-2|  Node-3   |
+  |  :9091      |  :9092 |  :9093    |
+  |  Raft:9181  |  :9182 |  :9183   |
+  |  --------   |  ------|  ------   |
+  |  Memtable   |  Memtable  Memtable|
+  |  SSTables   |  SSTables  SSTables|
+  |  WAL+CRC32  |  WAL+CRC32  WAL    |
+  |  BloomFilter|  BloomFilter  BF   |
+  |  LRU Cache  |  LRU Cache  LRU    |
+  +------+------+--------+-----------+
+         +------ Raft gRPC consensus -+
+                       |
+           Prometheus (:9090) -> Grafana (:3000)
 ```
 
 ---
@@ -87,100 +83,95 @@ flowchart TD
 
 | Module | Description |
 |---|---|
-| `proto/` | Protocol Buffer definitions (`.proto`) for all gRPC services: `KvService`, `RaftService` |
-| `storage-engine/` | Self-contained LSM-tree library: WAL, Memtable, SSTables, Compaction, Bloom Filter, LRU Cache |
-| `node/` | Runnable storage node: Spring Boot + gRPC server + Raft lifecycle + actuator metrics |
-| `coordinator/` | REST gateway: consistent-hash routing, replication, SSE event stream |
-| `raft/` | Transport-agnostic Raft consensus state machine + gRPC transport |
-| `client/` | Java client SDK (in progress) |
+| `proto/` | Protocol Buffer definitions for `KvService` (Put/Get/Delete/Ping) and `RaftService` (RequestVote/AppendEntries) |
+| `storage-engine/` | Self-contained LSM-tree library: WAL, Memtable, SSTables, Compaction, Bloom Filter, LRU Cache, TTL |
+| `node/` | Runnable storage node: Spring Boot + gRPC server + Raft lifecycle + Micrometer metrics |
+| `coordinator/` | REST gateway: consistent-hash routing, leader-aware write routing, SSE event stream |
+| `raft/` | Transport-agnostic Raft consensus state machine + gRPC transport layer |
 | `ui/` | React/Vite real-time cluster dashboard |
-| `config/` | Prometheus scrape config + Grafana provisioning |
+| `config/` | Prometheus scrape config + Grafana dashboard provisioning |
 
 ---
 
 ## Storage Engine (LSM-Tree)
 
-The storage engine is a complete Log-Structured Merge-Tree implementation, following the same fundamental design as RocksDB and Cassandra.
+A complete Log-Structured Merge-Tree following the same fundamental design as RocksDB and LevelDB.
 
 ### Write Path
 
-```mermaid
-flowchart LR
-    classDef default fill:#fff,stroke:#666,stroke-width:1px,color:#000
-    classDef start fill:#f0f0f0,stroke:#333,stroke-width:2px,color:#000
-    classDef decision fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
-    
-    W(["put(key, value)"]):::start
-    WAL["WalWriter\n(fsync)"]
-    MEM["SkipListMemtable\n(memory)"]
-    FLUSH{"Full?"}:::decision
-    SST["SSTableWriter\n(.sst)"]
-    NEWMEM["New Memtable"]
-
-    W --> WAL & MEM
-    MEM --> FLUSH
-    FLUSH -->|"≥ 8MB"| SST
-    SST --> NEWMEM
 ```
+put(key, value)
+      |
+      +---> 1. Append to WAL (sequential write + fsync + CRC32)
+      |
+      +---> 2. Insert into SkipListMemtable (ConcurrentSkipListMap, sorted, lock-free)
+                   |
+           (When memtable reaches MEMTABLE_MAX_MB)
+                   |
+                   v
+             3. Flush to SSTable on disk (immutable, sorted)
+                   |
+                   v
+             4. Background Compaction (size-tiered, N files -> 1)
+```
+
+**Why sequential writes?** Random disk writes have millisecond latency due to seek time. Sequential appends (WAL + SSTable flushes) are 10-100x faster on both SSDs and HDDs.
 
 ### Read Path
 
-```mermaid
-flowchart TD
-    classDef default fill:#fff,stroke:#666,stroke-width:1px,color:#000
-    classDef start fill:#f0f0f0,stroke:#333,stroke-width:2px,color:#000
-    classDef decision fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
-    classDef endNode fill:#f9f9f9,stroke:#999,stroke-width:1px,color:#666,stroke-dasharray: 4 4
-    
-    G(["get(key)"]):::start
-    MEM["SkipListMemtable"]
-    HIT1{"Found?"}:::decision
-    BLOOM["Bloom Filter\n(might contain?)"]
-    RANGE["Key Range\nPre-filter"]
-    IDX["Binary Search\n(Sparse Index)"]
-    SCAN["Linear Scan\n(Data Block)"]
-    HIT2{"Tombstone?"}:::decision
-    
-    RESULT_HIT(["Return Value"]):::endNode
-    RESULT_MISS(["Not Found"]):::endNode
-    RESULT_DEL(["Return Deleted"]):::endNode
-
-    G --> MEM --> HIT1
-    HIT1 -->|"Yes"| RESULT_HIT
-    HIT1 -->|"No"| BLOOM
-    BLOOM --> RANGE --> IDX --> SCAN --> HIT2
-    HIT2 -->|"No (Value)"| RESULT_HIT
-    HIT2 -->|"Yes (Deleted)"| RESULT_DEL
-    SCAN -->|"Exhausted"| RESULT_MISS
+```
+get(key)
+    |
+    v
+1. LRU Cache -> if hit, return immediately
+    |
+    v
+2. SkipListMemtable -> if found, return (may be a tombstone = deleted)
+    |
+    v
+3. For each SSTable (newest to oldest):
+   a. Bloom Filter -> if "definitely not present", skip file entirely
+   b. Key range pre-check (firstKey/lastKey) -> if out of range, skip
+   c. Binary search sparse index -> find nearest data block offset
+   d. Linear scan data block -> find exact key or determine absent
+    |
+    v
+Return value / tombstone / not-found
 ```
 
 ### SSTable File Format
 
 Each `.sst` file is a single sequential write with four sections:
 
-```mermaid
-block-beta
-    columns 1
-    block:file
-        DataBlock["Data Block (sorted KV)"]
-        SparseIndex["Sparse Index"]
-        BloomFilter["Bloom Filter"]
-        Footer["Footer (offsets)"]
-    end
-
-    style DataBlock fill:#fff,stroke:#666,color:#000
-    style SparseIndex fill:#f9f9f9,stroke:#666,color:#000
-    style BloomFilter fill:#f0f0f0,stroke:#666,color:#000
-    style Footer fill:#e8e8e8,stroke:#666,color:#000
 ```
++------------------------------------------------------+
+|  DATA BLOCK                                          |
+|  Sorted: [4B keyLen][key][1B flags][4B valLen][value][8B version]
++------------------------------------------------------+
+|  BLOOM FILTER BLOCK                                  |
+|  MurmurHash3 bit-array (1% false-positive rate)      |
++------------------------------------------------------+
+|  SPARSE INDEX BLOCK                                  |
+|  [4B count] then N x [4B keyLen][key][8B dataOffset] |
++------------------------------------------------------+
+|  FOOTER (28 bytes, fixed)                            |
+|  [8B indexOffset][8B bloomOffset][4B entryCount][8B magic]
++------------------------------------------------------+
+```
+
+**Tombstones:** DELETE writes a tombstone (`flags & 0x01`) rather than erasing the key. This is required because older versions may exist in lower SSTables. Tombstones are purged during compaction.
 
 ### Compaction
 
-Size-tiered compaction runs in the background when the SSTable count exceeds the configured threshold. It merges N SSTables into one, eliminating tombstones and duplicate keys. This keeps read amplification bounded.
+Size-tiered compaction runs in a background thread when SSTable count exceeds threshold. It performs a sorted k-way merge of N SSTables into one, eliminating duplicate keys (keeps highest version) and tombstones. This bounds read amplification and reclaims disk space.
+
+### Crash Safety
+
+On startup, `WalReader` replays the WAL from the last valid record. Each record has a CRC32 checksum. If a truncated or corrupt record is detected (e.g. power failure mid-write), replay stops cleanly at the last verified offset — no partial writes reach the Memtable.
 
 ### TTL Support
 
-Keys can be written with an optional TTL (time-to-live). A background `TtlReaper` thread periodically scans the memtable and removes expired entries before they reach disk.
+Keys written with an optional TTL are expired by a background `TtlReaper` thread, which writes tombstones for expired keys before they flush to disk.
 
 ---
 
@@ -188,112 +179,120 @@ Keys can be written with an optional TTL (time-to-live). A background `TtlReaper
 
 ### Consistent Hashing
 
-The coordinator routes every key to the correct storage node using a **consistent-hash ring** — the same algorithm used by DynamoDB and Cassandra.
+The coordinator routes every key using a **consistent-hash ring** — the same algorithm as DynamoDB and Cassandra.
 
-**Why not `hash(key) % N`?** Modulo hashing breaks when nodes join or leave — every key potentially remaps. Consistent hashing bounds remapping to only the keys owned by the affected node.
+**Why not `hash(key) % N`?** Modulo hashing remaps every key when nodes join or leave. Consistent hashing bounds remapping to only the keys owned by the affected node.
 
 **How it works:**
-1. The 128-bit MD5 hash space is treated as a ring (0 → 2¹²⁸ − 1).
-2. Each physical node is placed at **150 virtual node positions** on the ring (e.g. `node-1#0`, `node-1#1`, …, `node-1#149`).
+1. The 128-bit MD5 hash space is treated as a ring (0 to 2^128 - 1).
+2. Each physical node gets **150 virtual node positions** (e.g. `node-1#0` ... `node-1#149`).
 3. A key is hashed with MD5 and routed to the **first node clockwise** from its position.
-4. The ring is backed by a `ConcurrentSkipListMap<BigInteger, NodeInfo>` — ceiling lookups are O(log N) and thread-safe.
+4. Ring is backed by `ConcurrentSkipListMap<BigInteger, NodeInfo>` — O(log N) ceiling lookups, thread-safe.
 
-**Virtual nodes** prevent hot-spots: with only 3 physical nodes and no VNodes, hash luck could give one node 60% of the keyspace. 150 VNodes ensure ≤5% deviation from perfectly even distribution.
+**Virtual nodes** prevent hot-spots: without VNodes, 3 physical nodes could give one node 60%+ of the keyspace. 150 VNodes ensures <=5% deviation.
 
-### Replication
+### Leader-Aware Write Routing
 
-Replication is fully managed via Raft consensus log replication. Writes are routed directly to the current leader, appended to the consensus log, and replicated to a majority of nodes before returning success to the coordinator.
+All writes (PUT, DELETE) are routed to the current Raft leader:
+1. Coordinator caches the last known leader ID.
+2. Sends the gRPC write directly to the cached leader.
+3. If the node responds `NOT_LEADER:<newLeaderId>`, coordinator updates cache and retries on the correct leader.
+4. Reads (GET) are routed via consistent hash to any live node.
 
 ---
 
 ## Raft Consensus
 
-Each storage node runs a `RaftNode` — a complete implementation of the Raft consensus algorithm (Ongaro & Ousterhout, 2014). The implementation is transport-agnostic: the state machine only knows about `handleRequestVote` and `handleAppendEntries`, while `GrpcRaftTransport` handles the actual network communication.
+Each storage node runs a `RaftNode` — a complete implementation of the Raft consensus algorithm (Ongaro & Ousterhout, 2014). The state machine is **transport-agnostic**: `GrpcRaftTransport` handles actual network calls. This design makes the state machine fully unit-testable in isolation.
 
 ### What is implemented
 
 | Feature | Status |
 |---|---|
-| Leader election with randomized timeout (150–300ms) | ✅ |
-| Heartbeat (empty AppendEntries every 50ms) | ✅ |
-| RequestVote RPC — term + log-up-to-date check | ✅ |
-| AppendEntries RPC — log consistency check + commit | ✅ |
-| Log replication on majority quorum | ✅ |
-| Raft → LSM bridge (committed entries applied to storage) | ✅ |
-| gRPC transport (`GrpcRaftTransport`) | ✅ |
-| Spring Boot lifecycle integration (`SmartLifecycle`) | ✅ |
-| Persistent state (term + votedFor flushed to disk) | ✅ |
+| Leader election with randomized timeout (150-300ms) | Done |
+| Heartbeat (empty AppendEntries every 50ms) | Done |
+| RequestVote RPC — term + log-up-to-date check | Done |
+| AppendEntries RPC — log consistency check + commit | Done |
+| Log replication on majority quorum (N/2 + 1) | Done |
+| Raft -> LSM bridge (committed entries applied to storage) | Done |
+| gRPC transport on dedicated Raft port | Done |
+| Spring Boot lifecycle integration (SmartLifecycle) | Done |
+| Persistent state (term + votedFor flushed to `raft.state`) | Done |
+| Follower rejects writes with `NOT_LEADER:<leaderId>` | Done |
 
 ### Raft Write Flow
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant CO as Coordinator
-    participant L as Leader Node
-    participant F as Followers (2)
-
-    C->>CO: PUT /api/v1/kv/key
-    CO->>L: gRPC KvService/Put
-    activate L
-    L->>L: appendEntry()
-    L->>F: AppendEntries RPC
-    F-->>L: ACK
-    Note over L: Quorum Reached
-    L->>L: commitIndex++
-    L->>L: LsmStorageEngine.put()
-    L-->>CO: gRPC response
-    deactivate L
-    CO-->>C: 200 OK
+```
+Client -> Coordinator -> Leader Node -> Followers (2)
+  PUT      gRPC Put      appendEntry()  AppendEntries RPC
+                         <-- ACK (quorum)
+                         commitIndex++
+                         LsmEngine.put()
+           <-- gRPC OK
+<-- 200 OK
 ```
 
-### Raft Role Visualization
+### Persistent State Guarantees
 
-The live dashboard shows each node's current Raft role in real-time:
+`currentTerm` and `votedFor` are written to `raft.state` before every state transition. This prevents:
+- **Term regression**: A rebooted node cannot decrement its term and issue stale votes.
+- **Double voting**: A rebooted node cannot vote for two candidates in the same term.
 
-```mermaid
-stateDiagram-v2
-    [*] --> FOLLOWER: Startup
+### Raft Roles
 
-    FOLLOWER --> CANDIDATE: Election Timeout
-    CANDIDATE --> LEADER: Majority Votes
-    CANDIDATE --> FOLLOWER: Higher Term Seen
-    LEADER --> FOLLOWER: Higher Term Seen
+```
+[Startup] --> FOLLOWER
+                 |
+        (election timeout)
+                 v
+            CANDIDATE --(majority votes)--> LEADER
+                 |                              |
+        (higher term)                  (higher term)
+                 +----------> FOLLOWER <--------+
 
-    note right of LEADER: Heartbeat (50ms)
-    note right of FOLLOWER: Reset Timer on Heartbeat
+LEADER: Sends heartbeat every 50ms
+FOLLOWER: Resets election timer on each valid heartbeat
+CANDIDATE: Transient state during elections
 ```
 
-- 👑 **LEADER** — amber border + crown badge in dashboard
-- **FOLLOWER** — normal appearance
-- **CANDIDATE** — purple badge (mid-election)
+Dashboard shows: amber border + crown badge for LEADER, purple badge for CANDIDATE.
 
 ---
 
-## Observability Dashboard
+## Observability
 
-The React dashboard (`/ui`) connects to the coordinator's SSE stream (`GET /api/v1/monitor/events`) and updates in real-time without polling.
+### Live React Dashboard (`localhost:5173`)
 
-### Features
+Connects to the coordinator SSE stream and updates in real-time without polling.
 
 | Panel | Description |
 |---|---|
+| **Stats Bar** | Cluster-wide operation counts, p99 latency, live event rate |
 | **Hash Ring** | SVG visualization of the MD5 ring with all 450 virtual node positions |
 | **Node Cards** | Live memtable fill %, WAL size, SSTable count, LRU cache hit rate, Raft role |
-| **Terminal Log** | Streaming event log (PUT/GET/DELETE operations, SSTable flushes, node status changes) |
-| **Storage Visualizer** | Deep view of SSTable files and memtable contents per node |
-| **Burst Test** | Fire N concurrent writes and observe how keys distribute across the ring |
-| **Write Path** | Animated diagram of the WAL → Memtable → SSTable flow |
-| **Interactive Store** | Manual PUT/GET/DELETE via the UI |
+| **Terminal Log** | Streaming event log: operations, SSTable flushes, node status changes |
+| **Storage Visualizer** | Deep view of SSTable files and live memtable contents per node |
+| **Burst Test** | Fire N concurrent writes and observe key distribution |
+| **Write Path** | Animated WAL -> Memtable -> SSTable flow diagram |
+| **Interactive Store** | Manual PUT/GET/DELETE from the UI |
 
-### Prometheus Metrics
+### Prometheus Metrics (`localhost:9090`)
 
-Every node exports metrics via Micrometer at `/actuator/prometheus`. Prometheus scrapes all 4 services every 15s. Key metrics:
+Key custom metrics exported per node:
 
-- `jvm_memory_used_bytes` — heap pressure
-- `http_server_requests_seconds` — request latency histograms
-- `grpc_server_requests_total` — gRPC call counts
-- Custom: memtable fill %, WAL bytes, SSTable count (via `/api/v1/storage/state`)
+| Metric | Description |
+|---|---|
+| `kv.raft.term` | Current Raft term |
+| `kv.raft.commit.index` | Committed log index |
+| `kv.raft.is.leader` | 1 if leader, 0 otherwise |
+| `kv.memtable.fill.percent` | Memtable usage % |
+| `kv.wal.bytes` | WAL file size in bytes |
+| `kv.sstable.count` | Number of SSTable files on disk |
+| `coordinator_puts_total` | Total PUT requests through coordinator |
+| `coordinator_gets_total` | Total GET requests |
+| `coordinator_errors_total` | Total coordinator errors |
+
+Grafana dashboards are auto-provisioned on first startup at `localhost:3000` (admin/admin).
 
 ---
 
@@ -311,62 +310,65 @@ Every node exports metrics via Micrometer at `/actuator/prometheus`. Prometheus 
 ### Option A — Full cluster with Docker Compose (recommended)
 
 ```bash
-# Clone the repo
 git clone https://github.com/shubhxtech/Distributed-NoSQL-Key-Value-Database.git
 cd Distributed-NoSQL-Key-Value-Database
 
-# Build images and start all 6 services
+# Build and start all services
 docker compose up --build -d
 
-# Wait ~30s for health checks to pass, then verify
+# Wait ~30s for health checks, then verify
 curl http://localhost:8080/api/v1/monitor/state
 ```
 
 | Service | URL | Description |
 |---|---|---|
 | **Coordinator REST API** | http://localhost:8080 | PUT / GET / DELETE |
-| **Dashboard UI** | http://localhost:5173 | Run separately (see below) |
-| **Node-1 Actuator** | http://localhost:8081/actuator | Health + Prometheus metrics |
+| **Node-1 Actuator** | http://localhost:8081/actuator | Health + metrics |
 | **Node-2 Actuator** | http://localhost:8082/actuator | |
 | **Node-3 Actuator** | http://localhost:8083/actuator | |
 | **Prometheus** | http://localhost:9090 | Metric queries |
 | **Grafana** | http://localhost:3000 | Dashboards (admin/admin) |
 
+Then start the dashboard UI:
+
+```bash
+cd ui && npm install && npm run dev
+# Dashboard: http://localhost:5173
+```
+
 ### Option B — Run locally without Docker
 
 ```bash
-# Build all modules
 ./gradlew build -x test
 
-# Terminal 1 — node-1
+# Terminal 1
 NODE_ID=node-1 GRPC_PORT=9091 HTTP_PORT=8081 RAFT_PORT=9181 \
   RAFT_PEERS="node-2=localhost:9182,node-3=localhost:9183" \
   ./gradlew :node:bootRun
 
-# Terminal 2 — node-2
+# Terminal 2
 NODE_ID=node-2 GRPC_PORT=9092 HTTP_PORT=8082 RAFT_PORT=9182 \
   RAFT_PEERS="node-1=localhost:9181,node-3=localhost:9183" \
   ./gradlew :node:bootRun
 
-# Terminal 3 — node-3
+# Terminal 3
 NODE_ID=node-3 GRPC_PORT=9093 HTTP_PORT=8083 RAFT_PORT=9183 \
   RAFT_PEERS="node-1=localhost:9181,node-2=localhost:9182" \
   ./gradlew :node:bootRun
 
-# Terminal 4 — coordinator
+# Terminal 4
 ./gradlew :coordinator:bootRun
 
-# Terminal 5 — dashboard UI
+# Terminal 5
 cd ui && npm install && npm run dev
 ```
 
-### Run tests
+### Run Tests
 
 ```bash
-# Run all tests
 ./gradlew test
 
-# Run Raft unit tests only (8 tests covering election, log replication, safety)
+# Raft unit tests only (covers election, log replication, split-vote, safety)
 ./gradlew :raft:test
 ```
 
@@ -374,7 +376,7 @@ cd ui && npm install && npm run dev
 
 ## API Reference
 
-### PUT — store a key-value pair
+### PUT
 
 ```bash
 curl -X PUT http://localhost:8080/api/v1/kv/user:1 \
@@ -382,28 +384,26 @@ curl -X PUT http://localhost:8080/api/v1/kv/user:1 \
   -d '{"value": "Shubh Sahu"}'
 
 # Response
-{"success": true, "routedTo": "node-2"}
+{"success": true, "routedTo": "node-2", "replicas": ["node-1", "node-3"]}
 ```
 
-### GET — retrieve a value
+### GET
 
 ```bash
 curl http://localhost:8080/api/v1/kv/user:1
 
 # Found
-{"found": true, "value": "Shubh Sahu", "routedTo": "node-2"}
+{"found": true, "value": "Shubh Sahu", "version": 1724142000000, "routedTo": "node-2"}
 
 # Not found
 {"found": false, "routedTo": "node-2"}
 ```
 
-### DELETE — remove a key
+### DELETE
 
 ```bash
 curl -X DELETE http://localhost:8080/api/v1/kv/user:1
-
-# Response
-{"success": true, "routedTo": "node-2"}
+# {"success": true, "routedTo": "node-2"}
 ```
 
 ### Cluster monitoring
@@ -415,63 +415,61 @@ curl http://localhost:8080/api/v1/monitor/state
 # Consistent hash ring (450 virtual nodes)
 curl http://localhost:8080/api/v1/monitor/ring
 
-# SSE event stream (keep-alive, real-time)
+# SSE event stream (real-time, keep-alive)
 curl -N http://localhost:8080/api/v1/monitor/events
 
-# Storage state for a specific node
+# Per-node storage state (Raft role, memtable %, SSTable count)
 curl http://localhost:8081/api/v1/storage/state
 
-# Deep storage dump (memtable + SSTable details)
+# Deep storage dump
 curl http://localhost:8081/api/v1/storage/debug/dump
 
-# Trigger manual compaction on node-1
+# Trigger manual compaction
 curl -X POST http://localhost:8081/api/v1/storage/compact
 ```
 
-### Fault injection (dashboard or API)
+### Fault injection
 
 ```bash
-# Simulate a network partition (coordinator stops routing to node-2)
+# Isolate node-2 at the coordinator level (stops routing to it)
 curl -X POST http://localhost:8080/api/v1/monitor/nodes/node-2/kill
 
-# Heal the partition
+# Reconnect node-2
 curl -X POST http://localhost:8080/api/v1/monitor/nodes/node-2/restart
 ```
 
-### Direct gRPC (via grpcurl)
+> **Note:** The isolate endpoint simulates a coordinator-level routing block, not a process kill. The node's Raft process continues running. To simulate a true crash, use `docker stop kv-node-2`.
+
+### Direct gRPC (grpcurl)
 
 ```bash
-# Ping a node
+# Ping
 grpcurl -plaintext -d '{"sender_id":"cli"}' localhost:9091 kvstore.v1.KvService/Ping
 
-# Put directly on node-1 (bypasses coordinator)
+# Put (bypasses coordinator, goes directly to node gRPC port)
 grpcurl -plaintext \
   -d '{"key":"hello","value":"'$(echo -n 'world' | base64)'"}' \
   localhost:9091 kvstore.v1.KvService/Put
 
-# Get directly from node-1
-grpcurl -plaintext \
-  -d '{"key":"hello"}' \
-  localhost:9091 kvstore.v1.KvService/Get
+# Get
+grpcurl -plaintext -d '{"key":"hello"}' localhost:9091 kvstore.v1.KvService/Get
 ```
 
 ---
 
 ## Configuration
 
-Node behavior is controlled via environment variables (used by Docker Compose) or `application.yml`.
-
 | Variable | Default | Description |
 |---|---|---|
-| `NODE_ID` | `node-1` | Unique node identifier in the cluster |
-| `HTTP_PORT` | `8080` | HTTP port for actuator + storage state API |
-| `GRPC_PORT` | `9090` | gRPC port for KvService RPCs |
-| `RAFT_PORT` | `9181` | Raft consensus gRPC port |
-| `RAFT_PEERS` | _(empty)_ | Comma-separated peer list: `"node-2=host:9182,node-3=host:9183"` |
-| `DATA_DIR` | `./data/node-1` | Directory for WAL files and SSTables |
-| `MEMTABLE_MAX_MB` | `8` | Flush memtable to SSTable at this size |
+| `NODE_ID` | `node-1` | Unique node identifier |
+| `HTTP_PORT` | `8081` | HTTP port for actuator + storage API |
+| `GRPC_PORT` | `9091` | gRPC port for client KvService RPCs |
+| `RAFT_PORT` | `9181` | Dedicated Raft consensus port (isolated from client traffic) |
+| `RAFT_PEERS` | _(empty)_ | `"node-2=host:9182,node-3=host:9183"` |
+| `DATA_DIR` | `./data/node-1` | Directory for WAL, SSTables, and `raft.state` |
+| `MEMTABLE_MAX_MB` | `8` | Flush threshold |
 
-Coordinator cluster membership is configured via `application.yml` or indexed environment variables:
+Coordinator cluster membership:
 
 ```bash
 KV_CLUSTER_NODES_0_ID=node-1
@@ -486,23 +484,26 @@ KV_CLUSTER_NODES_0_HTTP_PORT=8081
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| **Memtable structure** | `ConcurrentSkipListMap` | Sorted iteration needed for SSTable writes; lock-free concurrent reads; Java standard library |
-| **SSTable format** | Custom binary (data + sparse index + bloom + footer) | Full control over on-disk layout; mirrors LevelDB/RocksDB format logic; no external dependency |
-| **Compaction strategy** | Size-tiered | Simpler to implement; write-heavy workloads benefit from fewer, larger files |
-| **Hash algorithm** | MD5 for consistent hashing | 128-bit output → lower collision probability than SHA-1's 160-bit on practical ring sizes; fast |
-| **Virtual nodes** | 150 per physical node | Cassandra uses 256; 150 gives <5% load deviation for a 3-node cluster |
-| **Consensus** | Custom Raft state machine | Maximum learning value; transport-agnostic design makes it unit-testable in isolation |
-| **Raft transport** | gRPC on dedicated port | Separates consensus traffic from client traffic; allows independent tuning |
-| **RaftNode integration** | `Consumer<RaftLogEntry>` callback | Decouples Raft from the storage engine; the applier lambda bridges the two |
-| **Spring lifecycle** | `SmartLifecycle` | Ensures Raft starts after the gRPC server is ready and shuts down cleanly |
-| **Metrics** | Micrometer + Prometheus | Standard JVM ecosystem; zero-code instrumentation for Spring + gRPC |
-| **SSE for dashboard** | Server-Sent Events over WebSocket | One-directional event push; simpler than WebSocket; no library overhead |
+| **Memtable** | `ConcurrentSkipListMap` | Sorted iteration for SSTable flush; lock-free CAS reads; no external library |
+| **WAL CRC32** | Per-record checksum | Detects torn writes; replay stops at first corrupt record |
+| **SSTable format** | Custom binary (data + bloom + sparse index + footer) | Full layout control; mirrors LevelDB format; zero external dependency |
+| **Sparse index** | Every Nth key -> byte offset | Lower memory vs full index; binary search + short linear scan |
+| **Compaction** | Size-tiered | Simpler; write-heavy workloads benefit from fewer, larger files |
+| **Hash algorithm** | MD5 (128-bit) | Uniformly distributed; faster than SHA for non-security routing |
+| **Virtual nodes** | 150 per physical node | <5% load deviation for 3-node cluster; Cassandra uses 256 |
+| **Consensus** | Custom Raft state machine | Maximum learning value; transport-agnostic for isolated unit testing |
+| **Raft port** | Dedicated gRPC port | Prevents client traffic from starving consensus heartbeats |
+| **Raft integration** | `Consumer<RaftLogEntry>` applier | Decouples Raft from storage; Raft stays independently testable |
+| **Persistent Raft state** | `raft.state` (term + votedFor) | Prevents term regression and double-voting after restart |
+| **Spring lifecycle** | `SmartLifecycle` | Ensures Raft starts after gRPC is ready; shuts down cleanly |
+| **Metrics** | Micrometer -> Prometheus -> Grafana | JVM standard; zero-code instrumentation |
+| **SSE for dashboard** | Server-Sent Events | One-directional push; no library overhead; browser-native |
 
 ### Consistency Model
 
-- **Default:** Leader-based reads — all writes go through the Raft leader; strong consistency.
-- **CAP stance:** CP — consistency is preferred over availability during network partitions. The cluster refuses writes if a quorum (2/3 nodes) cannot be reached.
-- **Read staleness:** Follower reads are available as a future flag, trading consistency for lower read latency.
+- **Writes:** Strong consistency — all PUTs and DELETEs commit via Raft quorum.
+- **Reads:** All nodes hold replicated committed state via Raft.
+- **CAP stance:** **CP** — consistency over availability; cluster refuses writes without quorum.
 
 ---
 
@@ -510,99 +511,98 @@ KV_CLUSTER_NODES_0_HTTP_PORT=8081
 
 ```
 Distributed-NoSQL-Key-Value-Database/
-│
-├── proto/                          # Protocol Buffer definitions
-│   └── src/main/proto/
-│       ├── kv.proto                # KvService: Put, Get, Delete, Ping RPCs
-│       └── raft.proto              # RaftService: RequestVote, AppendEntries RPCs
-│
-├── storage-engine/                 # LSM-tree storage library (no Spring dep)
-│   └── src/main/java/com/kvstore/engine/
-│       ├── LsmStorageEngine.java   # Main engine: ties all subsystems together
-│       ├── StorageEngine.java      # Interface: put / get / delete / close
-│       ├── ValueEntry.java         # Value + timestamp + TTL + tombstone flag
-│       ├── wal/                    # Write-Ahead Log
-│       │   ├── WalWriter.java      # Append + fsync
-│       │   ├── WalReader.java      # Replay on startup
-│       │   └── WalEntry.java       # Serializable WAL record
-│       ├── lsm/
-│       │   └── SkipListMemtable.java  # ConcurrentSkipListMap wrapper
-│       ├── sstable/
-│       │   ├── SSTableWriter.java  # Writes data+index+bloom+footer
-│       │   ├── SSTableReader.java  # Binary search + bloom pre-filter
-│       │   └── SSTableMetadata.java# In-memory metadata per file
-│       ├── bloomfilter/
-│       │   └── BloomFilter.java    # MurmurHash bit-array filter
-│       ├── cache/
-│       │   └── LruCache.java       # LinkedHashMap-based LRU cache
-│       ├── compaction/
-│       │   └── CompactionManager.java  # Background size-tiered compaction
-│       └── ttl/
-│           └── TtlReaper.java      # Background TTL expiry thread
-│
-├── raft/                           # Raft consensus module (no Spring dep)
-│   └── src/main/java/com/kvstore/raft/
-│       ├── RaftNode.java           # Core state machine: election + replication
-│       ├── RaftLog.java            # Thread-safe append-only log
-│       ├── RaftLogEntry.java       # Log record: term + index + command bytes
-│       ├── RaftCommand.java        # Serializable PUT/DELETE command (JSON)
-│       ├── RaftRole.java           # Enum: FOLLOWER, CANDIDATE, LEADER
-│       ├── RaftTransport.java      # Interface: sendRequestVote, sendAppendEntries
-│       ├── GrpcRaftTransport.java  # gRPC implementation of RaftTransport
-│       └── RaftServiceGrpcImpl.java# Server-side gRPC handler for peer RPCs
-│
-├── node/                           # Runnable storage node (Spring Boot)
-│   └── src/main/java/com/kvstore/node/
-│       ├── NodeApplication.java    # Spring beans: engine, raft, lifecycle
-│       ├── config/
-│       │   └── NodeProperties.java # @ConfigurationProperties binding
-│       ├── grpc/
-│       │   ├── KvServiceGrpcImpl.java  # Serves client PUT/GET/DELETE RPCs
-│       │   └── RaftGrpcService.java    # @GrpcService wrapper for RaftServiceGrpcImpl
-│       └── monitoring/
-│           └── StorageStateController.java  # GET /api/v1/storage/state + compact
-│
-├── coordinator/                    # REST gateway + routing (Spring Boot)
-│   └── src/main/java/com/kvstore/coordinator/
-│       ├── CoordinatorApplication.java
-│       ├── api/
-│       │   └── KvRestController.java   # PUT / GET / DELETE REST endpoints
-│       ├── routing/
-│       │   └── ConsistentHashRouter.java  # MD5 ring + virtual nodes
-│       ├── replication/
-│       │   └── ReplicationService.java    # Fan-out writes to replica nodes
-│       ├── client/
-│       │   └── NodeGrpcClient.java        # gRPC stub pool per node
-│       └── monitoring/
-│           ├── ClusterEvent.java          # SSE event record (type + nodeId + extra)
-│           ├── ClusterEventBus.java       # SSE emitter registry
-│           ├── MonitoringController.java  # SSE stream + kill/restart endpoints
-│           └── NodeStatePoller.java       # Polls nodes every 2s, emits events
-│
-├── ui/                             # React/Vite dashboard
-│   └── src/
-│       ├── components/
-│       │   ├── Dashboard.tsx       # Main layout with tabs
-│       │   ├── NodeCard.tsx        # Per-node metrics card (memtable, SSTs, Raft role)
-│       │   ├── HashRing.tsx        # SVG consistent-hash ring visualizer
-│       │   ├── TerminalLog.tsx     # Live event stream terminal
-│       │   ├── StorageVisualizer.tsx  # SSTable + memtable deep view
-│       │   ├── BurstTest.tsx       # Concurrent write load tester
-│       │   ├── InteractiveStore.tsx   # Manual PUT/GET/DELETE UI
-│       │   └── WritePath.tsx       # Animated write path diagram
-│       └── hooks/
-│           └── useClusterStream.ts # SSE connection + node state reducer
-│
-├── config/                         # Observability config
-│   ├── prometheus.yml              # Scrape config for all 4 services
-│   └── grafana/provisioning/       # Auto-provisioned Prometheus datasource
-│
-├── docker-compose.yml              # Full cluster: 3 nodes + coordinator + prometheus + grafana
-├── Dockerfile.node                 # Multi-stage build: JDK21 builder → JRE21 runtime
-├── Dockerfile.coordinator          # Multi-stage build for coordinator
-├── build.gradle                    # Root Gradle build (plugin versions)
-├── gradle.properties               # Shared dependency versions
-└── settings.gradle                 # Subproject declarations
+|
++-- proto/
+|   +-- src/main/proto/
+|       +-- kv.proto                # KvService: Put, Get, Delete, Ping
+|       +-- raft.proto              # RaftService: RequestVote, AppendEntries
+|
++-- storage-engine/
+|   +-- src/main/java/com/kvstore/engine/
+|       +-- LsmStorageEngine.java
+|       +-- StorageEngine.java      # Interface
+|       +-- ValueEntry.java         # Value + timestamp + TTL + tombstone flag
+|       +-- wal/
+|       |   +-- WalWriter.java      # Append + fsync + CRC32
+|       |   +-- WalReader.java      # Crash-safe replay on startup
+|       |   +-- WalEntry.java
+|       +-- lsm/
+|       |   +-- SkipListMemtable.java
+|       +-- sstable/
+|       |   +-- SSTableWriter.java  # Writes data + bloom + sparse index + footer
+|       |   +-- SSTableReader.java  # Bloom pre-filter + binary search + linear scan
+|       |   +-- SSTableMetadata.java
+|       +-- bloomfilter/
+|       |   +-- BloomFilter.java    # MurmurHash3, 1% FPR
+|       +-- cache/
+|       |   +-- LruCache.java
+|       +-- compaction/
+|       |   +-- CompactionManager.java  # Background size-tiered k-way merge
+|       +-- ttl/
+|           +-- TtlReaper.java
+|
++-- raft/
+|   +-- src/main/java/com/kvstore/raft/
+|       +-- RaftNode.java           # State machine: election + replication + commit
+|       +-- RaftLog.java            # Thread-safe append-only log
+|       +-- RaftLogEntry.java       # term + index + command bytes
+|       +-- RaftCommand.java        # Base64 PUT/DELETE command
+|       +-- RaftRole.java           # FOLLOWER, CANDIDATE, LEADER
+|       +-- RaftTransport.java      # Interface
+|       +-- GrpcRaftTransport.java  # gRPC implementation
+|       +-- RaftServiceGrpcImpl.java
+|
++-- node/
+|   +-- src/main/java/com/kvstore/node/
+|       +-- NodeApplication.java    # Spring beans + gRPC server lifecycle
+|       +-- config/NodeProperties.java
+|       +-- grpc/
+|       |   +-- KvServiceGrpcImpl.java  # PUT/GET/DELETE; enforces leader check
+|       +-- metrics/
+|       |   +-- StorageMetrics.java     # Raft term, commit index, is_leader gauges
+|       +-- monitoring/
+|           +-- StorageStateController.java  # /storage/state + /compact + /debug/dump
+|
++-- coordinator/
+|   +-- src/main/java/com/kvstore/coordinator/
+|       +-- CoordinatorApplication.java
+|       +-- api/KvRestController.java        # PUT/GET/DELETE with leader-aware routing
+|       +-- routing/ConsistentHashRouter.java
+|       +-- replication/ReplicationService.java  # @Deprecated - superseded by Raft
+|       +-- client/NodeGrpcClient.java
+|       +-- monitoring/
+|           +-- ClusterEvent.java
+|           +-- ClusterEventBus.java
+|           +-- MonitoringController.java    # SSE stream + isolate/reconnect
+|           +-- NodeStatePoller.java
+|
++-- ui/
+|   +-- src/
+|       +-- components/
+|       |   +-- Dashboard.tsx
+|       |   +-- NodeCard.tsx           # Per-node metrics + Raft role
+|       |   +-- HashRing.tsx           # SVG ring visualizer
+|       |   +-- TerminalLog.tsx        # Live event stream
+|       |   +-- StorageVisualizer.tsx  # SSTable + memtable deep view
+|       |   +-- BurstTest.tsx          # Load tester
+|       |   +-- InteractiveStore.tsx   # Manual CRUD
+|       |   +-- StatsBar.tsx
+|       |   +-- WritePath.tsx          # Animated write path diagram
+|       +-- hooks/
+|           +-- useClusterStream.ts    # SSE + node state reducer
+|
++-- config/
+|   +-- prometheus.yml
+|   +-- grafana/provisioning/
+|       +-- datasources/
+|       +-- dashboards/kv-dashboard.json   # Pre-built Grafana dashboard
+|
++-- docker-compose.yml
++-- Dockerfile.node
++-- Dockerfile.coordinator
++-- build.gradle
++-- gradle.properties
++-- settings.gradle
 ```
 
 ---
